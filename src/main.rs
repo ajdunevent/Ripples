@@ -1505,11 +1505,7 @@ pub(crate) fn action_row_add_suffix(row: &impl IsA<libadwaita::ActionRow>, child
     }
 }
 
-/// Same binding gap as action_row_add_suffix above, same fix -- add_
-/// prefix has no safe wrapper in libadwaita-sys 0.9.2 either. Checked
-/// directly against the real FFI declaration (`adw_action_row_add_
-/// prefix(self_: *mut AdwActionRow, widget: *mut GtkWidget)`) before
-/// writing this, not assumed from add_suffix's own shape alone.
+/// adw_action_row_add_prefix has no safe wrapper in libadwaita-sys 0.9.2.
 pub(crate) fn action_row_add_prefix(row: &impl IsA<libadwaita::ActionRow>, child: &impl IsA<gtk4::Widget>) {
     let row: &libadwaita::ActionRow = row.upcast_ref();
     let child: &gtk4::Widget = child.upcast_ref();
@@ -1873,8 +1869,8 @@ fn display_remote_subpath(subpath: &str) -> String {
 /// back and duplicating inside the parent's own sync target.
 ///
 /// Path::starts_with, not a naive string-prefix check -- component-
-/// aware specifically so "/home/aj/Documents" and
-/// "/home/aj/DocumentsBackup" are correctly treated as unrelated
+/// aware specifically so "/home/user/Documents" and
+/// "/home/user/DocumentsBackup" are correctly treated as unrelated
 /// siblings, not a false-positive overlap a plain string comparison
 /// would wrongly flag.
 fn find_overlapping_local_connection<'a>(connections: &'a [config::SyncConnection], account_id: &str, local_path: &Path) -> Option<&'a config::SyncConnection> {
@@ -7242,24 +7238,8 @@ fn refresh_account_ui(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>) {
                     .subtitle(glib::markup_escape_text(&subtitle).as_str())
                     .build();
 
-                // Per-connection enable/disable, per a direct request:
-                // a switch, not an icon-toggle button matching the
-                // Session tab's own pause button -- the icon reads
-                // ambiguously here (does the icon mean "click to
-                // change state" or "current state"?) since, unlike
-                // the Session tab's status_row, this row has no
-                // adjacent status text to disambiguate it. A switch's
-                // own position is the state, directly, with no such
-                // ambiguity. Prefix, not suffix, per direct, explicit,
-                // repeated request. Deliberately "enabled/disabled,"
-                // not "paused/resumed," per a direct, later
-                // correction -- this app already has a separate,
-                // established global pause/resume concept (paused_by_
-                // user, the Session tab's own pause button, the tray
-                // menu's "Pause Syncing"/"Resume Syncing"), and
-                // reusing that same language here for a genuinely
-                // different, per-connection concept would blur a
-                // distinction worth keeping clear.
+                // Wording is enabled/disabled; paused/resumed is the global
+                // pause (paused_by_user, Session tab, tray menu).
                 let enabled_switch = gtk4::Switch::builder()
                     .active(connection.enabled)
                     .valign(gtk4::Align::Center)
@@ -7278,30 +7258,11 @@ fn refresh_account_ui(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>) {
                         }
                         save_config(&state);
                         if !now_enabled {
-                            // Same, real mechanism the connection-removal
-                            // handler and the global pause toggle already
-                            // use -- see active_sync_cancels' own doc
-                            // comment on AppState. Scoped to just this
-                            // one connection's id, not a full .clear(),
-                            // since every other connection should keep
-                            // running undisturbed.
+                            // Cancels only this connection's in-flight sync.
                             state.active_sync_cancels.borrow_mut().remove(&connection.id);
 
-                            // Clears this connection's own currently-
-                            // pending issues, per a direct request. Only
-                            // the rows already sitting as genuine,
-                            // unresolved issues at this exact moment --
-                            // journal::forget_item per issue, not
-                            // journal::forget_connection (the whole-
-                            // connection wipe the removal handler above
-                            // uses): an already-conflicted item's own
-                            // last_synced_* baseline is already known
-                            // stale (that's what made it an issue in the
-                            // first place), so there's nothing worth
-                            // protecting there, but a file that's simply
-                            // already synced and sitting quietly has real
-                            // rename-detection history worth keeping,
-                            // untouched by this.
+                            // forget_item per issue, not forget_connection: synced
+                            // files keep their journal entries for rename detection.
                             let mut issues = state.pending_issues.borrow_mut();
                             let (to_forget, remaining): (Vec<_>, Vec<_>) = issues
                                 .drain(..)
@@ -7314,21 +7275,7 @@ fn refresh_account_ui(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>) {
                                 }
                             }
                         } else {
-                            // Forces a genuine, full re-crawl on re-
-                            // enable, per a direct request: "everything
-                            // on that Sync Connection needs to be
-                            // rescanned like a fresh start." Without
-                            // this, the very next round would just
-                            // follow the connection's own, ordinary
-                            // schedule -- almost certainly the cheap,
-                            // etag-based shortcut (try_etag_skip), not a
-                            // real, thorough look at every file. This is
-                            // the same, real mechanism Sync Now already
-                            // uses for exactly this reason (bypassing
-                            // try_etag_skip entirely -- see force_full_
-                            // check's own doc comment on AppState) --
-                            // spawn_immediate_sync_round below is what
-                            // actually consumes it.
+                            // Bypasses try_etag_skip so every file is rescanned.
                             state.force_full_check.borrow_mut().insert(connection.id.clone());
                         }
                         refresh_account_ui(&state, &watcher);

@@ -413,10 +413,7 @@ pub fn open(db_path: &Path) -> SqlResult<Connection> {
             -- (permission_error, last_synced_inode, last_synced_fileid)
             -- -- this app has no ALTER TABLE migration path at all yet,
             -- so an already-existing database still won't gain this
-            -- column without a dev-reset.sh wipe or an equivalent
-            -- migration step added later, once that actually matters
-            -- for real, deployed user databases rather than active
-            -- development.
+            -- column without a database wipe or a migration step.
             permission_error_message TEXT,
             status            TEXT NOT NULL DEFAULT 'pending',
             updated_at        INTEGER NOT NULL,
@@ -916,7 +913,7 @@ pub fn forget_prefix(conn: &Connection, connection_id: &str, prefix: &str) -> Sq
 /// sync_child_directory's own use for the real, reported bug this exists
 /// to fix. A directory's own top-level row can end up without
 /// last_synced_mtime set for reasons that don't actually mean "this was
-/// never synced" (a database wiped via dev-reset.sh mid-testing while
+/// never synced" (a database wiped mid-testing while
 /// the real files/directories on both sides survived untouched, an
 /// unresolved edge case from an earlier session, etc.) -- but if
 /// anything genuinely underneath it still carries a real, previously-

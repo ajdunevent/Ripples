@@ -2,194 +2,62 @@
 name = "ripples"
 version = "0.1.0"
 edition = "2021"
-# GPL-3.0-or-later, not -only -- the FSF's own recommendation for new
-# projects absent a specific reason to lock to one version, and matches
-# what's set in main.rs's own About dialog (gtk4::License::Gpl30).
-# Needed given MoreWaita's bundled tray icons (see tray.rs) are
-# themselves GPL-3.0-only -- licensing Ripples' own code as GPLv3
-# sidesteps any ambiguity about bundling a GPL'd creative asset
-# alongside separately-licensed code, rather than leaving that an open
-# legal question.
+# -or-later rather than -only; MoreWaita's bundled tray icons (tray.rs) are GPL-3.0-only.
 license = "GPL-3.0-or-later"
 
 [dependencies]
-# 0.9/0.7 (my earlier pin) turned out to internally require DIFFERENT
-# glib-sys/gio-sys versions from each other (0.20 vs 0.22) even though
-# they resolve together without a hard conflict -- Cargo happily builds
-# two separate glib instances to satisfy both, which is exactly what blew
-# up as "expected glib::ExitCode, found gtk4::glib::ExitCode" on a real
-# build. Confirmed gtk4-sys 0.11.4 and libadwaita-sys 0.9.2 both require
-# glib-sys/gio-sys "0.22" -- same line, single shared instance.
+# gtk4-sys 0.11.4 and libadwaita-sys 0.9.2 both require glib-sys/gio-sys 0.22.
+# gtk4 0.9 / libadwaita 0.7 pulled in a second glib (0.20), which broke the
+# build with "expected glib::ExitCode, found gtk4::glib::ExitCode".
 gtk4 = { version = "0.11", features = ["v4_18"] }
-# AdwAboutDialog's builder needs "v1_5" (its field setters) and
-# "gtk_v4_18" (its .build() specifically -- confirmed via real
-# libadwaita-rs source, and confirmed both target devices -- the FLX1s
-# and the NixOS desktop -- report GTK 4.22.4 / libadwaita 1.9.0 via
-# pkg-config, comfortably clearing this with real margin, not a razor's
-# edge. gtk_v4_18 implies gtk_v4_10, so that doesn't need listing
-# separately. gtk4's own feature bumped to "v4_18" to match -- it was
-# "v4_12", lower than what libadwaita's side now needs, and these two
-# crates need to agree on which system library version they're each
-# assuming is actually present.
+# AdwAboutDialog's builder needs v1_5, and .build() needs gtk_v4_18.
 libadwaita = { version = "0.9", features = ["v1_4", "v1_5", "gtk_v4_18"] }
-# "v2_72" needed for gio::File::move_future specifically (confirmed via
-# real gio-rs source: gated behind #[cfg(feature = "v2_72")]) -- I'd
-# checked that the method existed in source earlier but not that it
-# needed its own feature flag, the same class of miss as the earlier
-# AdwAboutDialog issue. GIO 2.72 (March 2022) is a much lower bar than
-# either target device's actual stack (GTK 4.22.4/libadwaita 1.9.0,
-# confirmed via pkg-config), so unlike that earlier case this carries
-# essentially no real compatibility risk.
+# gio::File::move_future is gated behind v2_72.
 gio = { version = "*", features = ["v2_72"] }
 glib = "*"
-async-channel = "2"                 # GLib-main-loop-friendly event channel; no Tokio anywhere -- also the cross-thread bridge to/from the tray's own dedicated thread below, confirmed genuinely Send+Sync for real cross-thread use, not just same-thread cooperative use
+# Also the cross-thread bridge to and from the tray thread.
+async-channel = "2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-rusqlite = { version = "0.31", features = ["bundled"] }  # sync journal, once we get there
-sha2 = "0.10"  # deterministic chunked-upload folder naming only (upload_via_chunking) -- see xxhash-rust just below for content-comparison hashing, which used to also use this crate before being confirmed unnecessarily slow for that specific, non-adversarial use case
-xxhash-rust = { version = "0.8", features = ["xxh3"] }  # content-comparison hashing (contents_match/webdav::hash) -- not a security context, so a fast, non-cryptographic hash is the right tool; confirmed via real benchmarking elsewhere in the ecosystem to be several times faster than SHA256 on the same input
-futures-util = "0.3"  # future::select for cancelling an in-flight sync_target when a connection is removed mid-round -- no need for the rest of the futures ecosystem, just this
-# System tray (tray.rs). "async-io" feature, not the default "tokio" --
-# deliberate: this app has zero Tokio anywhere else, and async-io's
-# feature wiring (confirmed via real ksni source) ties to zbus/async-io,
-# which needs no separate runtime-builder ceremony the way tokio does --
-# just async_io::block_on(...) directly. Runs on its own dedicated OS
-# thread (std::thread::spawn, not glib::MainContext::spawn_local) --
-# ksni's async-io feature still doesn't run ON glib's own MainContext,
-# it's a genuinely separate reactor, so this is the one place in the
-# whole app that isn't single-threaded Rc/RefCell -- everything crossing
-# that boundary goes through the async-channel above, in small owned
-# messages, never a shared Rc.
+rusqlite = { version = "0.31", features = ["bundled"] }
+# Chunked-upload folder naming only (upload_via_chunking).
+sha2 = "0.10"
+# Content comparison (contents_match, webdav::hash). Several times faster than SHA-256.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+# future::select, to cancel an in-flight sync_target.
+futures-util = "0.3"
+# Tray (tray.rs). async-io feature, not the default tokio. Runs on its own OS
+# thread; ksni does not run on glib's MainContext. Cross-thread traffic goes
+# through async-channel.
 ksni = { version = "0.3", default-features = false, features = ["async-io"] }
-async-io = "2"  # drives ksni's D-Bus service via async_io::block_on on the tray's dedicated thread -- reactor-aware, unlike a generic executor-agnostic block_on, so it correctly drives zbus's underlying socket I/O
-# Direct D-Bus query -- checking whether any StatusNotifierHost is
-# actually registered and running, to gray out the "Use system tray"
-# Settings toggle when one genuinely isn't available (see
-# check_tray_available in main.rs). ksni itself doesn't expose this --
-# it implements the StatusNotifierItem side of the protocol, not a
-# generic client for querying the Watcher service on the Item's own
-# behalf, so this is a separate, direct connection rather than
-# something reachable through ksni's own API. Version and features
-# (default-features off, async-io on) match ksni 0.3.1's own pinned
-# dependency exactly (confirmed via its real Cargo.lock, not assumed),
-# so this doesn't pull in a second, differently-configured zbus build
-# alongside the one ksni already uses internally.
+async-io = "2"
+# Queries whether a StatusNotifierHost is registered (check_tray_available).
+# Version and features match ksni 0.3.1 so only one zbus is built.
 zbus = { version = "5", default-features = false, features = ["async-io"] }
-# Decodes the embedded tray icon PNGs (tray.rs) into raw ARGB32 pixel
-# data for ksni::Icon -- same crate ksni's own documentation pairs with
-# icon_pixmap() for exactly this "static inlined icon" use case.
+# Decodes tray icon PNGs into ARGB32 for ksni::Icon.
 image = { version = "0.25", default-features = false, features = ["png"] }
-
-# notify_push (main.rs's push-notification listener) -- the plain,
-# synchronous `tungstenite`, deliberately NOT `tokio-tungstenite`. Runs
-# on its own dedicated OS thread (same shape as the tray's own thread
-# above), which has nothing else to do while listening, so a fully
-# blocking WebSocket client is actually simpler here than an async one
-# would be -- no reactor of any kind needed for this piece at all, not
-# even async-io's lighter-weight one.
+# notify_push listener. Blocking tungstenite on a dedicated OS thread.
 tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
-# The HTTP calls this app makes outside of notify_push's own WebSocket
-# (webdav.rs's entire remote client, and push.rs's own notify_push
-# capabilities/pre_auth exchange and ETag-tier PROPFIND) -- reqwest's
-# `blocking` feature specifically, not the plain async client: every
-# caller in this app is already a one-off call on its own dedicated OS
-# thread (the same run_blocking pattern used throughout), so a client
-# that manages its own internal runtime per call is simpler to reason
-# about here than threading a shared async runtime through everything
-# that isn't already on one. NOT ureq, despite starting there -- real,
-# confirmed dealbreaker found directly in ureq-proto's own source (the
-# actual crate that encodes the request line, a dependency of ureq
-# itself): it hardcodes a fixed allowlist of methods per HTTP version
-# (GET/HEAD/POST, plus PUT/DELETE/CONNECT/OPTIONS/TRACE/PATCH for 1.1)
-# and rejects anything outside it outright -- confirmed still true as of
-# ureq-proto 0.6.0, its current latest release, not something fixed in
-# a newer version. PROPFIND/MKCOL/MOVE, the WebDAV extension methods
-# this whole client exists to send, simply cannot be sent through ureq
-# at all, no matter how the request is built on this app's own side.
-# hyper (what reqwest is built on) was checked directly too, the same
-# way -- it only ever special-cases GET/HEAD/CONNECT for their RFC-
-# mandated response-body quirks, never rejects a method outright.
-reqwest = { version = "0.13", features = ["blocking", "form"] }  # "form" added specifically for nextcloud_login.rs's own Login Flow v2 poll requests (a single url-encoded "token" field) -- confirmed directly against reqwest's own source that RequestBuilder::form is feature-gated (#[cfg(feature = "form")]), same as json is for a different feature; chose enabling this over hand-rolling url-encoding for what looks like a trivially simple, single-field body but isn't a place worth risking a subtly wrong manual implementation over
-# Securely clears the few, deliberately narrow places this app ever
-# touches a raw credential (the notify_push pre_auth exchange, and
-# every WebDAV request's own Authorization header -- see goa.rs's
-# get_password_for_http_auth) from memory immediately after use, rather
-# than trusting ordinary `Drop` -- which only deallocates, it doesn't
-# guarantee the underlying bytes are actually overwritten.
+# All WebDAV and push HTTP calls, via reqwest's blocking client on dedicated
+# threads. ureq-proto 0.6.0 rejects PROPFIND, MKCOL and MOVE. The form feature
+# is for the Login Flow v2 poll in nextcloud_login.rs.
+reqwest = { version = "0.13", features = ["blocking", "form"] }
+# Clears credentials from memory after use (notify_push pre_auth, WebDAV
+# Authorization headers).
 zeroize = "1"
-# nextcloud_login.rs's own credential storage for direct (non-GOA)
-# Nextcloud accounts -- GOA accounts already get this for free via GOA's
-# own keyring integration (goa.rs's get_password_for_http_auth), but a
-# direct account has no GOA layer to lean on, so this app needs to store
-# its own app password securely itself. oo7, not the older C libsecret:
-# pure Rust (no libsecret FFI dependency to link against), and
-# confirmed (via its own docs) to automatically pick the right backend --
-# the real Secret Service D-Bus API on an ordinary session (this app's
-# own primary target -- an ordinary Phosh session, not a sandbox), or a
-# sandboxed file-based backend if this app is ever run inside a Flatpak
-# (see TODO.md's own "Consider Flatpak packaging" entry) -- where
-# libsecret has documented, unresolved problems working correctly at
-# all. Both backends ship in the crate unconditionally, not gated behind
-# their own separate feature flags -- oo7::Keyring::new() alone already
-# picks the right one at runtime; using the sandboxed "file" backend
-# specifically isn't relevant unless/until Flatpak packaging is actually
-# pursued.
-oo7 = { version = "0.6", default-features = false, features = ["native_crypto", "async-std"] }  # the dbus backend (Secret Service) needed here isn't behind its own separate feature at all -- always compiled in, confirmed directly against oo7's own README feature table, which lists exactly tracing/async-std/tokio/native_crypto/openssl_crypto/unstable and nothing named "dbus". "async-std", not the default "tokio" (used for oo7's own IO/filesystem operations, not directly relevant to the Secret Service backend this app actually uses, but the safer, lighter-weight option to opt into regardless over pulling in a second, unrelated async runtime this app otherwise has none of -- confirmed via oo7's own docs that its async functions run fine driven by any executor, glib's own MainContext included, not just tokio/async-std)
-# webdav.rs's own PROPFIND response parsing (see that module's own top
-# comment for the full migration this is part of). Deliberately not
-# hand-rolled the way push.rs's own extract_etag is -- that one only
-# ever pulls a single, well-known tag out of a single-entry response;
-# a full directory listing is a genuinely nested, repeated,
-# multi-entry <d:multistatus> shape (one <d:response> per item, each
-# with its own <d:href> and <d:propstat><d:prop> block), which is
-# exactly the more general case that function's own doc comment says
-# would need a real parser. Matched against local_name() throughout,
-# not hardcoded "d:"/"D:" prefix strings -- confirmed via quick-xml's
-# own source that this correctly ignores whichever namespace prefix a
-# given server happens to use, rather than assuming Nextcloud's own
-# lowercase "d:" convention is universal.
+# App password storage for direct (non-GOA) accounts, in nextcloud_login.rs.
+# Selects the Secret Service backend on a normal session and a file backend
+# under Flatpak. async-std rather than the default tokio, to avoid a second runtime.
+oo7 = { version = "0.6", default-features = false, features = ["native_crypto", "async-std"] }
+# PROPFIND multistatus parsing in webdav.rs. Matched on local_name() so any
+# namespace prefix works.
 quick-xml = "0.36"
-
-# Suspend-aware elapsed-time source for the periodic-poll scheduling
-# gates specifically (last_full_check, and the periodic timer's own
-# round_finished) -- not a general Instant replacement everywhere in
-# this app, just those two. Confirmed as a real, reported bug without
-# this: std::time::Instant on Linux is backed by CLOCK_MONOTONIC, which
-# does not advance during system suspend (confirmed directly against
-# multiple sources, including Rust's own docs: "it is also not
-# specified whether system suspends count as elapsed time or not," and
-# a platform-specific confirmation for Linux itself: "does not count
-# time spent in a sleep state such as hibernation or standby"). On a
-# phone that spends most of an idle period suspended, every elapsed-
-# time check built on Instant silently undercounts real wall-clock
-# time -- a connection could sit well past its own configured interval
-# without ever being recognized as overdue, surfacing as exactly what
-# was reported: hours of Idle with nothing in the log despite known
-# remote changes.
-#
-# boot_time::Instant is backed by CLOCK_BOOTTIME instead (confirmed
-# directly against its own docs' platform table: "Unix (Linux/L4Re/
-# Android/OpenBSD) | clock_gettime (Monotonic Clock with CLOCK_BOOTTIME
-# source)"), which does include suspended time -- but this doesn't add
-# any new, proactive wakeups on its own: the periodic timer's own
-# glib::timeout_future_seconds tick, which is what actually reads this
-# clock, already only ever fires while the device is genuinely awake
-# for some other reason (a suspended process can't execute any code at
-# all, so the mere fact that a tick runs is itself proof the device is
-# currently awake, regardless of which clock is being read once it
-# does). This crate changes what gets compared once a tick happens to
-# run, not when ticks happen at all -- a real, reported "we don't want
-# unnecessary wakeups" constraint respected either way.
+# Instant on Linux uses CLOCK_MONOTONIC, which does not advance during suspend,
+# so periodic-poll gates (last_full_check, round_finished) undercounted elapsed
+# time on a phone. boot_time uses CLOCK_BOOTTIME. Adds no wakeups.
 boot-time = "0.1"
 
-# Scoped to just the icon/desktop-file asset mapping for now -- the
-# real app icon exists as of tonight, so that specific blocker is gone,
-# but this is deliberately NOT the full cargo-deb setup (maintainer,
-# description, depends, etc. all still need real values) -- that
-# remains its own, separate TODO item. This section alone is enough for
-# `cargo deb` to install the icon and .desktop file to the right
-# hicolor/applications paths; it won't yet produce a fully-correct
-# package on its own.
+# Icon and desktop-file install paths only. Not a complete cargo-deb config.
 [package.metadata.deb]
 assets = [
     ["assets/icons/app/net.dunevent.Ripples.svg", "usr/share/icons/hicolor/scalable/apps/net.dunevent.Ripples.svg", "644"],

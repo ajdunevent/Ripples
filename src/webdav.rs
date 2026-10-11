@@ -348,7 +348,7 @@ fn transfer_client() -> reqwest::blocking::Client {
 
 /// Converts GOA's own `davs://user@host:port/path` Files:Uri shape
 /// (confirmed via GoaAccountInfo's own doc comment, e.g.
-/// "davs://aj@cloud.dunevent.net:443/remote.php/webdav/") into a plain
+/// "davs://user@cloud.example.com:443/remote.php/webdav/") into a plain
 /// `https://` URL. gvfsd-dav needed the `davs://` scheme, and the
 /// leading `user@` userinfo, to know how to mount the account; neither
 /// belongs in an ordinary request URI for a client that isn't mounting

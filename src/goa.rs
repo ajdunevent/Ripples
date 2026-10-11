@@ -54,7 +54,7 @@ pub struct GoaAccountInfo {
     pub presentation_identity: String,
     pub server_url: Option<String>,
     /// The raw Files:Uri as GOA reports it (e.g.
-    /// "davs://aj@cloud.dunevent.net:443/remote.php/webdav/") -- this is
+    /// "davs://user@cloud.example.com:443/remote.php/webdav/") -- this is
     /// what sync.rs actually mounts and builds child paths against.
     /// server_url above is the reconstructed bare https:// root, useful
     /// for display, but reversing it a second time to get back to a
@@ -447,7 +447,7 @@ fn clean_presentation_identity(identity: &str, server_url: Option<&str>, raw_pre
         // restores parity with for the common case, without losing the
         // non-default-port case entirely -- confirmed as a real
         // regression once observed in practice (a Nextcloud account
-        // showing "aj@cloud.dunevent.net:443").
+        // showing "user@cloud.example.com:443").
         match scheme {
             "https" => host.strip_suffix(":443").unwrap_or(host),
             "http" => host.strip_suffix(":80").unwrap_or(host),
