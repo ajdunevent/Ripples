@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- 
+    Symbolic icon for Ripples
+    Designed for a transparent 16x16 canvas with a currentcolor fill.
+    Canvas diagonal distance from (0,0) to (16,16) is approx 22.627.
+  -->
+  <g fill="none" stroke="currentColor" stroke-width="2.715" stroke-linecap="round">
+    <!-- Top-left concentric ripples -->
+    <circle cx="0" cy="0" r="2.2627" />
+    <circle cx="0" cy="0" r="5.883" />
+    <circle cx="0" cy="0" r="9.5033" />
+
+    <!-- Bottom-right concentric ripples -->
+    <circle cx="16" cy="16" r="2.2627" />
+    <circle cx="16" cy="16" r="5.883" />
+    <circle cx="16" cy="16" r="9.5033" />
+  </g>
+</svg>

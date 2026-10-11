@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Ripples
+Comment=Sync client for Nextcloud, ownCloud, and WebDAV
+Exec=ripples
+Icon=net.dunevent.Ripples
+Terminal=false
+Categories=Network;FileTransfer;
+StartupNotify=true
