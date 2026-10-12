@@ -1,26 +1,16 @@
 <p align="center">
-<<<<<<< HEAD
-  <img src="assets/icons/app/net.dunevent.Ripples.svg" width="96" alt="Ripples icon">
-=======
   <img src="assets/icons/app/net.dunevent.Ripples.svg" alt="Ripples icon">
->>>>>>> 9fc3b30 (Add README)
 </p>
 
 # Ripples
 
 An adaptive Nextcloud sync client built for GNOME Shell and Phosh using Rust and libadwaita
 
-<<<<<<< HEAD
-![SCREENSHOT: hero](docs/screenshots/hero.png)
-
-![SCREENSHOT: session-phone](docs/screenshots/session-phone.png)
-=======
 <p align="center">
   <img src="docs/screenshots/hero.png" width="500" alt="SCREENSHOT: hero">
   
   <img src="docs/screenshots/session-phone.png" width="225" alt="SCREENSHOT: session-phone">
 </p>
->>>>>>> 9fc3b30 (Add README)
 
 ## Features
 
@@ -35,11 +25,6 @@ An adaptive Nextcloud sync client built for GNOME Shell and Phosh using Rust and
 - Connections can be bidirectional, upload only, or download only
 - Enable/disable switch per connection
 
-<<<<<<< HEAD
-![SCREENSHOT: connections](docs/screenshots/connections.png)
-
-![SCREENSHOT: add-connection](docs/screenshots/add-connection.png)
-=======
 <p align="center">
   <img src="docs/screenshots/connections.png" width="225" alt="SCREENSHOT: connections">
 </p>
@@ -47,7 +32,6 @@ An adaptive Nextcloud sync client built for GNOME Shell and Phosh using Rust and
 <p align="center">
   <img src="docs/screenshots/add-connection.png" width="215" alt="SCREENSHOT: add-connection">
 </p>
->>>>>>> 9fc3b30 (Add README)
 
 ### Change detection
 
@@ -61,11 +45,7 @@ An adaptive Nextcloud sync client built for GNOME Shell and Phosh using Rust and
 - Files that look changed on both sides are compared by content hash (XXH3)
 - Large files hashed in parallel 128 MiB chunks using HTTP range requests
 - Local renames and moves detected by inode and replayed as a remote move instead of a delete and re-upload
-<<<<<<< HEAD
-- Transfers are atomic: Downloads write a temporary file then rename it and uploads write a temporary remote object the WebDAV MOVE it into place
-=======
 - Transfers are atomic: Downloads write a temporary file then rename it, and uploads write a temporary remote object then WebDAV MOVE it into place
->>>>>>> 9fc3b30 (Add README)
 - Large uploads use the Nextcloud chunking API when the server supports it
 - File modifications are gated by a settle time to avoid uploading a half-written file
 - Executable bits survive a re-download
@@ -76,13 +56,9 @@ An adaptive Nextcloud sync client built for GNOME Shell and Phosh using Rust and
 - Resolution dialog shows live local and remote details
 - Conflicting items are re-checked every round, so further changes on either side are noticed
 
-<<<<<<< HEAD
-![SCREENSHOT: conflict-dialog](docs/screenshots/conflict-dialog.png)
-=======
 <p align="center">
   <img src="docs/screenshots/conflict-dialog.png" width="205" alt="SCREENSHOT: conflict-dialog">
 </p>
->>>>>>> 9fc3b30 (Add README)
 
 ### Exclusions
 
@@ -97,13 +73,9 @@ An adaptive Nextcloud sync client built for GNOME Shell and Phosh using Rust and
 - Optional automatic pausing of transfers in system power-saver mode
 - Slower polling while on battery
 
-<<<<<<< HEAD
-![SCREENSHOT: settings](docs/screenshots/settings.png)
-=======
 <p align="center">
   <img src="docs/screenshots/settings.png" width="240" alt="SCREENSHOT: settings">
 </p>
->>>>>>> 9fc3b30 (Add README)
 
 ### Desktop integration
 
@@ -111,13 +83,9 @@ An adaptive Nextcloud sync client built for GNOME Shell and Phosh using Rust and
 - Optional launch at login, started hidden with `--hidden`
 - Runs in background unless quit from menu or Ctrl+Q
 
-<<<<<<< HEAD
-![SCREENSHOT: tray](docs/screenshots/tray.png)
-=======
 <p align="center">
   <img src="docs/screenshots/tray.png" alt="SCREENSHOT: tray">
 </p>
->>>>>>> 9fc3b30 (Add README)
 
 ## Building
 
@@ -128,11 +96,7 @@ Requirements:
 - `pkg-config` and a C compiler such as `gcc`
 
 ```
-<<<<<<< HEAD
-git clone https://dev.dunevent.net/aj/Ripples.git&& cd Ripples
-=======
 git clone https://dev.dunevent.net/aj/Ripples.git && cd Ripples
->>>>>>> 9fc3b30 (Add README)
 cargo build --release
 ```
 
