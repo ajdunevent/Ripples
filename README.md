@@ -6,36 +6,15 @@
 
 An adaptive Nextcloud sync client built for GNOME Shell and Phosh using Rust and libadwaita
 
-## 🤖 AI Disclaimer
-
-This project has relied extensively AI-assisted development tools.
-
-### Contribution Profile
-
-```
-Phase                               Human│ AI
-─────────────────────────────────────────┼───────────────
-Requirements & Scope      100% ██████████│             0%
-Architecture & Design      80%   ████████│░░          20%
-Implementation              2%           │░░░░░░░░░░  98%
-Testing                   100% ██████████│             0%
-Documentation              40%       ████│░░░░░░      60%
-```
-
 ## Screenshots
 
 <p align="center">
-  <a href="Ripples/src/branch/main/docs/screenshots/phone.png"><img src="docs/screenshots/phone.png" height="600" alt="SCREENSHOT: phone mode"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="Ripples/src/branch/main/docs/screenshots/transfer.png"><img src="docs/screenshots/transfer.png" height="600" alt="SCREENSHOT: transfers"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="Ripples/src/branch/main/docs/screenshots/conflict-dialog.png"><img src="docs/screenshots/conflict-dialog.png" height="600" alt="SCREENSHOT: conflict-dialog"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="Ripples/src/branch/main/docs/screenshots/connections.png"><img src="docs/screenshots/connections.png" height="600" alt="SCREENSHOT: connections"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="Ripples/src/branch/main/docs/screenshots/add-connection.png"><img src="docs/screenshots/add-connection.png" height="600" alt="SCREENSHOT: add-connection"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="Ripples/src/branch/main/docs/screenshots/settings.png"><img src="docs/screenshots/settings.png" height="600" alt="SCREENSHOT: settings"></a>
+  <img src="docs/screenshots/phone.png" height="600" alt="Session tab in phone mode">
+  <img src="docs/screenshots/transfer.png" height="600" alt="Transfers in progress">
+  <img src="docs/screenshots/conflict-dialog.png" height="600" alt="Options for resolving a conflict">
+  <img src="docs/screenshots/connections.png" height="600" alt="Connections tab in phone mode">
+  <img src="docs/screenshots/add-connection.png" height="600" alt="First page of the add-connection wizard">
+  <img src="docs/screenshots/settings.png" height="600" alt="Settings tab in phone mode">
 </p>
 
 ## Features
@@ -43,7 +22,7 @@ Documentation              40%       ████│░░░░░░      60%
 ### Account Options
 
 - Direct login via Nextcloud's Login Flow v2
-- Alternatively, select account from GNOME Online Accounts (including experimental, limited support for ownCloud and generic WebDAV servers)
+- Alternatively, select account from GNOME Online Accounts (including limited, experimental support for ownCloud and generic WebDAV servers)
 
 ### Sync Connections
 
@@ -94,7 +73,7 @@ Documentation              40%       ████│░░░░░░      60%
 - Runs in background unless quit from menu or Ctrl+Q
 
 <p>
-  <img src="docs/screenshots/tray.png" alt="SCREENSHOT: tray">
+  <img src="docs/screenshots/tray.png" alt="System tray icon showing menu">
 </p>
 
 ## Building
@@ -141,6 +120,24 @@ Developed against GTK 4.22 and libadwaita 1.9.
 
 - Resumable uploads and downloads
 - Exclusion rules that follow renames
+
+## AI Disclaimer
+
+This project has relied extensively on AI-assisted development, primarily Anthropic's Claude (various models), under human direction and manual testing.
+
+### Contribution Profile
+
+```
+Phase                     Human                      AI
+───────────────────────────────────────────────────────
+Requirements & Scope      100% ████████████████████  0%
+Architecture & Design      75% ███████████████░░░░░ 25%
+Implementation              2% █░░░░░░░░░░░░░░░░░░░ 98%
+Testing                    90% ██████████████████░░ 10%
+Documentation              25% █████░░░░░░░░░░░░░░░ 75%
+```
+***Humorous aside:***  
+These were not the original approximations but Claude expressed that some were "**generous** to the human side," adding "*and I can back that up from the repository.*"  Girl came with RECEIPTS, lol.
 
 ## License
 
