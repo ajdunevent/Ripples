@@ -6,10 +6,10 @@
 
 An adaptive Nextcloud sync client built for GNOME Shell and Phosh using Rust and libadwaita
 
-<p align="center">
-  <img src="docs/screenshots/hero.png" width="500" alt="SCREENSHOT: hero">
-  
-  <img src="docs/screenshots/session-phone.png" width="225" alt="SCREENSHOT: session-phone">
+<p>
+  <img src="docs/screenshots/hero.png" width="70%" alt="SCREENSHOT: hero"> 
+  &nbsp;&nbsp;&nbsp;&nbsp; 
+  <img src="docs/screenshots/session-phone.png" width="70%" alt="SCREENSHOT: session-phone">
 </p>
 
 ## Features
@@ -26,11 +26,9 @@ An adaptive Nextcloud sync client built for GNOME Shell and Phosh using Rust and
 - Enable/disable switch per connection
 
 <p align="center">
-  <img src="docs/screenshots/connections.png" width="225" alt="SCREENSHOT: connections">
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/add-connection.png" width="215" alt="SCREENSHOT: add-connection">
+  <img src="docs/screenshots/connections.png" width="70%" alt="SCREENSHOT: connections">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/screenshots/add-connection.png" width="70%" alt="SCREENSHOT: add-connection">
 </p>
 
 ### Change detection
@@ -57,7 +55,7 @@ An adaptive Nextcloud sync client built for GNOME Shell and Phosh using Rust and
 - Conflicting items are re-checked every round, so further changes on either side are noticed
 
 <p align="center">
-  <img src="docs/screenshots/conflict-dialog.png" width="205" alt="SCREENSHOT: conflict-dialog">
+  <img src="docs/screenshots/conflict-dialog.png" width="70%" alt="SCREENSHOT: conflict-dialog">
 </p>
 
 ### Exclusions
@@ -74,7 +72,7 @@ An adaptive Nextcloud sync client built for GNOME Shell and Phosh using Rust and
 - Slower polling while on battery
 
 <p align="center">
-  <img src="docs/screenshots/settings.png" width="240" alt="SCREENSHOT: settings">
+  <img src="docs/screenshots/settings.png" width="70%" alt="SCREENSHOT: settings">
 </p>
 
 ### Desktop integration
