@@ -6,10 +6,36 @@
 
 An adaptive Nextcloud sync client built for GNOME Shell and Phosh using Rust and libadwaita
 
-<p>
-  <img src="docs/screenshots/hero.png" width="70%" alt="SCREENSHOT: hero"> 
-  &nbsp;&nbsp;&nbsp;&nbsp; 
-  <img src="docs/screenshots/session-phone.png" width="70%" alt="SCREENSHOT: session-phone">
+## 🤖 AI Disclaimer
+
+This project has relied extensively AI-assisted development tools.
+
+### Contribution Profile
+
+```
+Phase                               Human│ AI
+─────────────────────────────────────────┼───────────────
+Requirements & Scope      100% ██████████│             0%
+Architecture & Design      80%   ████████│░░          20%
+Implementation              2%           │░░░░░░░░░░  98%
+Testing                   100% ██████████│             0%
+Documentation              40%       ████│░░░░░░      60%
+```
+
+## Screenshots
+
+<p align="center">
+  <a href="Ripples/src/branch/main/docs/screenshots/phone.png"><img src="docs/screenshots/phone.png" height="600" alt="SCREENSHOT: phone mode"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="Ripples/src/branch/main/docs/screenshots/transfer.png"><img src="docs/screenshots/transfer.png" height="600" alt="SCREENSHOT: transfers"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="Ripples/src/branch/main/docs/screenshots/conflict-dialog.png"><img src="docs/screenshots/conflict-dialog.png" height="600" alt="SCREENSHOT: conflict-dialog"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="Ripples/src/branch/main/docs/screenshots/connections.png"><img src="docs/screenshots/connections.png" height="600" alt="SCREENSHOT: connections"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="Ripples/src/branch/main/docs/screenshots/add-connection.png"><img src="docs/screenshots/add-connection.png" height="600" alt="SCREENSHOT: add-connection"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="Ripples/src/branch/main/docs/screenshots/settings.png"><img src="docs/screenshots/settings.png" height="600" alt="SCREENSHOT: settings"></a>
 </p>
 
 ## Features
@@ -24,12 +50,6 @@ An adaptive Nextcloud sync client built for GNOME Shell and Phosh using Rust and
 - Configure multiple local-folder to remote-folder pairs per account
 - Connections can be bidirectional, upload only, or download only
 - Enable/disable switch per connection
-
-<p align="center">
-  <img src="docs/screenshots/connections.png" width="70%" alt="SCREENSHOT: connections">
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="docs/screenshots/add-connection.png" width="70%" alt="SCREENSHOT: add-connection">
-</p>
 
 ### Change detection
 
@@ -54,10 +74,6 @@ An adaptive Nextcloud sync client built for GNOME Shell and Phosh using Rust and
 - Resolution dialog shows live local and remote details
 - Conflicting items are re-checked every round, so further changes on either side are noticed
 
-<p align="center">
-  <img src="docs/screenshots/conflict-dialog.png" width="70%" alt="SCREENSHOT: conflict-dialog">
-</p>
-
 ### Exclusions
 
 - Global glob patterns (`*.tmp`, `node_modules`) with a built-in default list
@@ -69,11 +85,7 @@ An adaptive Nextcloud sync client built for GNOME Shell and Phosh using Rust and
 
 - Optional automatic pausing of transfers on metered connections
 - Optional automatic pausing of transfers in system power-saver mode
-- Slower polling while on battery
-
-<p align="center">
-  <img src="docs/screenshots/settings.png" width="70%" alt="SCREENSHOT: settings">
-</p>
+- Less frequent polling while on battery
 
 ### Desktop integration
 
@@ -81,7 +93,7 @@ An adaptive Nextcloud sync client built for GNOME Shell and Phosh using Rust and
 - Optional launch at login, started hidden with `--hidden`
 - Runs in background unless quit from menu or Ctrl+Q
 
-<p align="center">
+<p>
   <img src="docs/screenshots/tray.png" alt="SCREENSHOT: tray">
 </p>
 
