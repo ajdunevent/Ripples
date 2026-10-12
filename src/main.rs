@@ -2937,9 +2937,8 @@ fn build_or_present_window(app: &libadwaita::Application, state: &Rc<AppState>) 
                 .application_name("Ripples")
                 .application_icon("net.dunevent.Ripples")
                 .version(env!("CARGO_PKG_VERSION")) // reads straight from Cargo.toml -- can't drift out of sync with the real build
-                .developer_name("AJ Dunevent")
-                .comments("A GNOME-native sync client for Nextcloud, ownCloud, and WebDAV.")
-                .website("https://dev.dunevent.net/aj/")
+                .comments("An adaptive Nextcloud sync client built for GNOME Shell and Phosh")
+                .website("https://dev.dunevent.net/aj/Ripples")
                 // Ripples itself is GPLv3 -- gtk4::License::Gpl30
                 // gives AdwAboutDialog's own built-in license display
                 // (standard boilerplate + full text on request), not
@@ -2967,28 +2966,9 @@ fn build_or_present_window(app: &libadwaita::Application, state: &Rc<AppState>) 
             about.add_credit_section(
                 Some("Credits"),
                 &["Tray status icons from the MoreWaita icon theme, licensed under GPLv3 https://github.com/somepaulo/MoreWaita"],
-            );
-            // Acknowledgements, not Credits -- neither of these
-            // contributed code or assets directly in this app, so
-            // Credits' usual meaning ("this is literally in the app")
-            // would overstate the relationship. GOA/GVfs are a
-            // meaningfully deeper dependency than GTK/libadwaita,
-            // though, so this isn't the same as crediting GNOME for the
-            // toolkit: they're actual running infrastructure doing
-            // substantial work Ripples would otherwise have to
-            // implement itself (GOA's whole OAuth/keyring/credential
-            // lifecycle; GVfs actually speaking WebDAV, actually
-            // mounting the share, actually executing the MOVE/COPY this
-            // app leans on) -- without them, this would need its own
-            // HTTP client, its own credential storage, an entire
-            // subsystem, not a UI layer. Nextcloud's client source was
-            // repeatedly read to answer real design questions and, in a
-            // few places, deliberately matched rather than
-            // independently re-derived.
             about.add_acknowledgement_section(
                 None,
                 &[
-                    "This project wouldn't exist without GNOME's GOA (account/credential management) and GVfs (WebDAV protocol implementation).",
                     "Several design decisions were informed by studying the Nextcloud desktop client's own open-source implementation.",
                 ],
             );
