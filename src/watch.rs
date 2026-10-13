@@ -83,6 +83,7 @@ impl WatchManager {
     /// has to be an owned, reference-counted handle, not a borrow tied to
     /// this call's own stack frame.
     pub fn sync_watches(&self, wanted: &[(String, PathBuf, Vec<String>)], global_patterns: &[crate::config::ExcludePattern], on_change: &Rc<dyn Fn(&str, &Path)>) {
+        let _section = crate::watchdog::section("watch rebuild");
         let mut watches = self.watches.borrow_mut();
 
         // Drop connections no longer wanted at all.

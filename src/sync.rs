@@ -2446,6 +2446,7 @@ async fn sync_child_directory(
     recurse: bool,
     events_tx: &async_channel::Sender<SyncEvent>,
 ) -> Result<(), SyncError> {
+    crate::watchdog::note("directory", child_relative);
     // Already handled by a rename pairing found elsewhere THIS round --
     // see SyncTarget::renamed_away's own doc comment for why this check
     // has to come first. For a directory specifically this isn't just a
@@ -2710,7 +2711,8 @@ async fn sync_child_directory(
                         // remove_dir_all handles arbitrary depth
                         // natively and has never shown this problem --
                         // this side is untouched.
-                        std::fs::remove_dir_all(&child_local).map_err(Into::into)
+                        let path = child_local.clone();
+                        run_blocking(move || std::fs::remove_dir_all(path)).await.map_err(Into::into)
                     } else {
                         // NOT a single recursive delete_future() on the
                         // directory itself (WebDAV's Depth: infinity)
@@ -2882,6 +2884,7 @@ async fn sync_child_file(
     skip_settling_checks: bool,
     events_tx: &async_channel::Sender<SyncEvent>,
 ) -> Result<(), SyncError> {
+    crate::watchdog::note("item", child_relative);
     // Already handled by a rename pairing found elsewhere THIS round --
     // see SyncTarget::renamed_away's own doc comment. Without this, the
     // old (renamed-away) path's own position here would decide

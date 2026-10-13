@@ -12,6 +12,7 @@ mod status;
 mod sync;
 mod tray;
 mod watch;
+mod watchdog;
 mod webdav;
 
 use std::cell::{Cell, RefCell};
@@ -897,6 +898,7 @@ fn main() -> glib::ExitCode {
     // activation, not every subsequent one).
     let raw_args: Vec<String> = std::env::args().collect();
     let hidden = raw_args.iter().any(|a| a == "--hidden");
+    watchdog::set_enabled(raw_args.iter().any(|a| a == "--watchdog"));
     // Deliberately a global static, not passed down as a parameter the
     // way `hidden` is to activate() -- debug logging is scattered across
     // both this file and sync.rs, at call depths far removed from
@@ -906,7 +908,7 @@ fn main() -> glib::ExitCode {
     // once, here, before anything else runs; see is_debug_enabled's own
     // doc comment for the read side.
     DEBUG_ENABLED.set(raw_args.iter().any(|a| a == "--debug")).expect("set exactly once, here, before any other code could have called is_debug_enabled() and raced this");
-    let filtered_args: Vec<String> = raw_args.into_iter().filter(|a| a != "--hidden" && a != "--debug").collect();
+    let filtered_args: Vec<String> = raw_args.into_iter().filter(|a| a != "--hidden" && a != "--debug" && a != "--watchdog").collect();
 
     let app = libadwaita::Application::builder().application_id(APP_ID).build();
 
@@ -3315,6 +3317,7 @@ async fn run_background(state: Rc<AppState>) {
     // own doc comment on AppState.
     let status_rx = state.status_events_rx.borrow_mut().take()
         .expect("status_events_rx taken exactly once, at startup");
+    watchdog::start(state.status_events_tx.clone());
     glib::MainContext::default().spawn_local(clone!(
         #[strong] state,
         #[strong] watcher,
@@ -4626,6 +4629,7 @@ fn retry_skipped_too_large(state: &Rc<AppState>) {
 /// status_log, then refreshes the Status tab. Runs on the main loop, so
 /// it's always safe to touch widgets directly here.
 fn apply_status_event(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>, event: status::SyncEvent) {
+    let _section = watchdog::section("status event");
     // Handled entirely separately from everything below -- these are
     // purely live, ephemeral UI state for the Active Transfers row, not
     // permanent log entries the way every other SyncEvent is (see
@@ -4805,6 +4809,7 @@ fn spawn_disk_log_flush_timer(state: &Rc<AppState>) {
 /// exporting "the session log" as the one, single, genuinely canonical
 /// record rather than a second, separately-assembled copy of it.
 fn flush_disk_log_now(state: &Rc<AppState>) {
+    let _section = watchdog::section("disk log flush");
     let lines: Vec<String> = state.disk_log_pending.borrow_mut().drain(..).collect();
     if !lines.is_empty() {
         let path = state.disk_log_path.borrow().clone();

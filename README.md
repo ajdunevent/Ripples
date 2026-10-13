@@ -96,7 +96,8 @@ Developed against GTK 4.22 and libadwaita 1.9.
 | Flag | Effect |
 | --- | --- |
 | `--hidden` | Start without showing the window (used by autostart) |
-| `--debug` | Enable verbose `[debug]` logging for this run |
+| `--debug` | Enable verbose `[debug]` logging |
+| `--watchdog` | Log UI stalls and slow main-thread operations to the session log |
 
 ## Files
 

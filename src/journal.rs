@@ -376,7 +376,10 @@ pub fn decide_action(
 }
 
 pub fn open(db_path: &Path) -> SqlResult<Connection> {
-    let conn = Connection::open(db_path)?;
+    let mut conn = Connection::open(db_path)?;
+    if crate::watchdog::enabled() {
+        conn.profile(Some(crate::watchdog::report_slow_statement));
+    }
     conn.pragma_update(None, "journal_mode", "WAL")?;
     // NORMAL, not the default FULL -- safe specifically because it's
     // paired with WAL above: WAL+NORMAL doesn't risk corruption the way

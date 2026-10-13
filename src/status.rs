@@ -250,6 +250,8 @@ pub enum SyncEvent {
     RemoteWriteStarted,
     /// See RemoteWriteStarted's own doc comment just above.
     RemoteWriteFinished,
+    /// Watchdog report (see watchdog.rs); logged only.
+    Diagnostic { message: String },
 }
 
 impl SyncEvent {
@@ -310,7 +312,8 @@ impl SyncEvent {
             // already get above). Still needs a real arm here since the
             // match itself must be exhaustive.
             | SyncEvent::RemoteWriteStarted
-            | SyncEvent::RemoteWriteFinished => SyncState::Idle,
+            | SyncEvent::RemoteWriteFinished
+            | SyncEvent::Diagnostic { .. } => SyncState::Idle,
         }
     }
 
@@ -393,6 +396,7 @@ impl SyncEvent {
             // exhaustive.
             SyncEvent::RemoteWriteStarted => String::new(),
             SyncEvent::RemoteWriteFinished => String::new(),
+            SyncEvent::Diagnostic { message } => message.clone(),
         }
     }
 }

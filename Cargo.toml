@@ -19,7 +19,7 @@ glib = "*"
 async-channel = "2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled", "trace"] }
 # Chunked-upload folder naming only (upload_via_chunking).
 sha2 = "0.10"
 # Content comparison (contents_match, webdav::hash). Several times faster than SHA-256.
