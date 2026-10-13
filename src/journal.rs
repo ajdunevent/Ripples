@@ -255,9 +255,16 @@ pub fn decide_action(
         // on that side," not "was deleted." A brand-new local file with
         // no remote copy yet must upload, not be treated as a delete
         // conflict against a remote that was never there to begin with.
+        //
+        // One-way directions mirror: the source side is authoritative,
+        // so an item present only on the other side is removed. The
+        // connection wizard warns about this when a one-way direction
+        // is chosen.
         return match (current_local, current_remote_etag, direction) {
-            (Some(_), None, _) => SyncAction::Upload,
-            (None, Some(_), _) => SyncAction::Download,
+            (Some(_), None, SyncDirection::Bidirectional | SyncDirection::UploadOnly) => SyncAction::Upload,
+            (Some(_), None, SyncDirection::DownloadOnly) => SyncAction::DeleteLocal,
+            (None, Some(_), SyncDirection::Bidirectional | SyncDirection::DownloadOnly) => SyncAction::Download,
+            (None, Some(_), SyncDirection::UploadOnly) => SyncAction::DeleteRemote,
             (None, None, _) => SyncAction::ForgetRow,
             // Present on both sides with no prior reconciliation
             // history -- could be coincidentally identical, but we
@@ -385,6 +392,14 @@ pub fn open(db_path: &Path) -> SqlResult<Connection> {
     // will never actually be needed. Same reasoning confirmed in the
     // real Nextcloud client's own connection setup.
     conn.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+    init_schema(&conn)?;
+    Ok(conn)
+}
+
+/// Creates every table and index the journal needs (idempotent). Split
+/// out of open() so tests can build the real schema on an in-memory
+/// connection instead of keeping hand-written copies that drift.
+fn init_schema(conn: &Connection) -> SqlResult<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS sync_items (
             id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -485,7 +500,7 @@ pub fn open(db_path: &Path) -> SqlResult<Connection> {
             updated_at     INTEGER NOT NULL
         );",
     )?;
-    Ok(conn)
+    Ok(())
 }
 
 /// The remote root's own ETag as of the last round that confirmed it --
@@ -1080,6 +1095,13 @@ pub fn direct_children(conn: &Connection, connection_id: &str, parent_relative: 
 mod tests {
     use super::*;
 
+    /// In-memory connection with the real schema from init_schema().
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn
+    }
+
     fn fresh_item() -> SyncItem {
         SyncItem::new("acct1", "Documents/todo.txt", false)
     }
@@ -1112,6 +1134,36 @@ mod tests {
         let item = fresh_item(); // never synced before
         let action = decide_action(&item, None, None, Some("etag1"), SyncDirection::Bidirectional);
         assert_eq!(action, SyncAction::Download);
+    }
+
+    #[test]
+    fn never_synced_local_only_by_direction() {
+        let item = fresh_item();
+        let local = Some((100, 50));
+        assert_eq!(decide_action(&item, local, None, None, SyncDirection::Bidirectional), SyncAction::Upload);
+        assert_eq!(decide_action(&item, local, None, None, SyncDirection::UploadOnly), SyncAction::Upload);
+        // DownloadOnly: the remote is authoritative, so a local-only
+        // item is removed rather than uploaded.
+        assert_eq!(decide_action(&item, local, None, None, SyncDirection::DownloadOnly), SyncAction::DeleteLocal);
+    }
+
+    #[test]
+    fn never_synced_remote_only_by_direction() {
+        let item = fresh_item();
+        let remote = Some("etag1");
+        assert_eq!(decide_action(&item, None, None, remote, SyncDirection::Bidirectional), SyncAction::Download);
+        assert_eq!(decide_action(&item, None, None, remote, SyncDirection::DownloadOnly), SyncAction::Download);
+        // UploadOnly: local is authoritative, so a remote-only item is
+        // removed rather than downloaded.
+        assert_eq!(decide_action(&item, None, None, remote, SyncDirection::UploadOnly), SyncAction::DeleteRemote);
+    }
+
+    #[test]
+    fn never_synced_absent_on_both_sides_forgets_row_in_every_direction() {
+        let item = fresh_item();
+        for d in [SyncDirection::Bidirectional, SyncDirection::UploadOnly, SyncDirection::DownloadOnly] {
+            assert_eq!(decide_action(&item, None, None, None, d), SyncAction::ForgetRow);
+        }
     }
 
     #[test]
@@ -1231,20 +1283,9 @@ mod tests {
 
     #[test]
     fn journal_roundtrip() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE sync_items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, connection_id TEXT NOT NULL,
-                relative_path TEXT NOT NULL, is_directory INTEGER NOT NULL,
-                local_mtime INTEGER, local_size INTEGER, remote_etag TEXT,
-                last_synced_mtime INTEGER, last_synced_size INTEGER, last_synced_etag TEXT,
-                permission_error INTEGER NOT NULL DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'pending', updated_at INTEGER NOT NULL,
-                UNIQUE(connection_id, relative_path)
-            );",
-        ).unwrap();
+        let conn = test_conn();
 
-        mark_synced(&conn, "acct1", "a.txt", false, 100, 50, "etag1", 1000).unwrap();
+        mark_synced(&conn, "acct1", "a.txt", false, 100, 50, "etag1", None, None, 1000).unwrap();
         let item = get_item(&conn, "acct1", "a.txt").unwrap().unwrap();
         assert_eq!(item.status, SyncStatus::Synced);
         assert_eq!(item.last_synced_etag.as_deref(), Some("etag1"));
@@ -1269,18 +1310,7 @@ mod tests {
 
     #[test]
     fn mark_conflict_pending_freezes_missing_side_as_none() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE sync_items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, connection_id TEXT NOT NULL,
-                relative_path TEXT NOT NULL, is_directory INTEGER NOT NULL,
-                local_mtime INTEGER, local_size INTEGER, remote_etag TEXT,
-                last_synced_mtime INTEGER, last_synced_size INTEGER, last_synced_etag TEXT,
-                permission_error INTEGER NOT NULL DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'pending', updated_at INTEGER NOT NULL,
-                UNIQUE(connection_id, relative_path)
-            );",
-        ).unwrap();
+        let conn = test_conn();
 
         // Delete-vs-change flavor: deleted locally, changed remotely --
         // current_local is None, current_remote_etag is Some.

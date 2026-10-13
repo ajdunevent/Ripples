@@ -2966,6 +2966,7 @@ fn build_or_present_window(app: &libadwaita::Application, state: &Rc<AppState>) 
             about.add_credit_section(
                 Some("Credits"),
                 &["Tray status icons from the MoreWaita icon theme, licensed under GPLv3 https://github.com/somepaulo/MoreWaita"],
+            );
             about.add_acknowledgement_section(
                 None,
                 &[
@@ -6369,8 +6370,8 @@ fn show_sync_issues_dialog(
         let connection = issue.connection().clone();
         let item = issue.item().clone();
 
-        let path_label = gtk4::Label::builder().css_classes(["heading"]).wrap(true).xalign(0.0).label(&item.relative_path).build();
-        let connection_label = gtk4::Label::builder().css_classes(["dim-label"]).xalign(0.0).label(&connection.name).build();
+        let path_label = gtk4::Label::builder().css_classes(["heading"]).wrap(true).wrap_mode(gtk4::pango::WrapMode::WordChar).xalign(0.0).label(&item.relative_path).build();
+        let connection_label = gtk4::Label::builder().css_classes(["dim-label"]).wrap(true).wrap_mode(gtk4::pango::WrapMode::WordChar).xalign(0.0).label(&connection.name).build();
 
         // Hidden until a resolution actually succeeds or fails -- see
         // this whole page's own doc comment on IssuePageWidgets for how
@@ -6379,12 +6380,12 @@ fn show_sync_issues_dialog(
         let success_banner = gtk4::Label::builder()
             .label("Resolution succeeded!")
             .css_classes(["success"])
-            .wrap(true).xalign(0.0)
+            .wrap(true).wrap_mode(gtk4::pango::WrapMode::WordChar).xalign(0.0)
             .visible(false)
             .build();
         let resolution_error_label = gtk4::Label::builder()
             .css_classes(["error"])
-            .wrap(true).xalign(0.0)
+            .wrap(true).wrap_mode(gtk4::pango::WrapMode::WordChar).xalign(0.0)
             .visible(false)
             .build();
 
@@ -6401,8 +6402,8 @@ fn show_sync_issues_dialog(
         let (action_buttons, remote_info_label) = match &issue {
             SyncIssue::Conflict(..) => {
                 dialog.set_title(Some("Resolve Conflicts"));
-                let local_info_label = gtk4::Label::builder().wrap(true).xalign(0.0).valign(gtk4::Align::Start).height_request(72).build();
-                let remote_info_label = gtk4::Label::builder().wrap(true).xalign(0.0).valign(gtk4::Align::Start).height_request(72).label("Loading\u{2026}").build();
+                let local_info_label = gtk4::Label::builder().wrap(true).wrap_mode(gtk4::pango::WrapMode::WordChar).xalign(0.0).valign(gtk4::Align::Start).height_request(72).build();
+                let remote_info_label = gtk4::Label::builder().wrap(true).wrap_mode(gtk4::pango::WrapMode::WordChar).xalign(0.0).valign(gtk4::Align::Start).height_request(72).label("Loading\u{2026}").build();
                 local_info_label.set_label(&format_local_file_info(&connection.local_path.join(&item.relative_path)));
 
                 let local_column = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).spacing(18).hexpand(true).build();
@@ -6412,11 +6413,12 @@ fn show_sync_issues_dialog(
                 remote_column.append(&gtk4::Label::builder().label("Remote").css_classes(["heading"]).xalign(0.0).build());
                 remote_column.append(&remote_info_label);
 
-                let columns_box = gtk4::Box::builder().orientation(gtk4::Orientation::Horizontal).spacing(48).build();
+                let columns_box = gtk4::Box::builder().orientation(gtk4::Orientation::Horizontal).spacing(48).homogeneous(true).build();
                 columns_box.append(&local_column);
                 columns_box.append(&remote_column);
                 dialog_breakpoint.add_setter(&columns_box, "orientation", Some(&gtk4::Orientation::Vertical.to_value()));
                 dialog_breakpoint.add_setter(&columns_box, "spacing", Some(&12i32.to_value()));
+                dialog_breakpoint.add_setter(&columns_box, "homogeneous", Some(&false.to_value()));
                 page_scrollable.append(&columns_box);
 
                 let keep_local_button = gtk4::Button::builder().label("Keep Local").hexpand(true).build();
@@ -6579,7 +6581,7 @@ fn show_sync_issues_dialog(
                 // empty or placeholder line in that case.
                 if let Some(message) = item.permission_error_message.as_deref().filter(|m| !m.is_empty()) {
                     let permission_error_detail_label = gtk4::Label::builder()
-                        .wrap(true).xalign(0.0).css_classes(["dim-label", "caption"])
+                        .wrap(true).wrap_mode(gtk4::pango::WrapMode::WordChar).xalign(0.0).css_classes(["dim-label", "caption"])
                         .label(message)
                         .build();
                     page_scrollable.append(&permission_error_detail_label);
@@ -8094,6 +8096,29 @@ fn show_folder_dialog(state: Rc<AppState>, watcher: Rc<GoaWatcher>, account: Acc
     page1_fields.append(&direction_upload_check);
     page1_fields.append(&direction_download_check);
     page1_fields.append(&direction_subtitle);
+    // Shown only for the one-way directions: the source side is
+    // authoritative, so items present only on the other side are deleted.
+    let direction_warning = gtk4::Label::builder()
+        .css_classes(["error"])
+        .wrap(true).xalign(0.0)
+        .visible(false)
+        .build();
+    for (check, warning) in [
+        (&direction_bidirectional_check, ""),
+        (&direction_upload_check, "Remote files not present locally will be deleted!"),
+        (&direction_download_check, "Local files not present on the remote will be deleted!"),
+    ] {
+        check.connect_toggled(clone!(
+            #[strong] direction_warning,
+            move |c| {
+                if c.is_active() {
+                    direction_warning.set_label(warning);
+                    direction_warning.set_visible(!warning.is_empty());
+                }
+            }
+        ));
+    }
+    page1_fields.append(&direction_warning);
 
     page1_fields.append(&overlap_error_label);
 

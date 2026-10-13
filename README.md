@@ -128,13 +128,13 @@ This project has relied extensively on AI-assisted development, primarily Anthro
 ### Contribution Profile
 
 ```
-Phase                     Human                      AI
+Phase                    Human █                  ░ AI
 ───────────────────────────────────────────────────────
 Requirements & Scope      100% ████████████████████  0%
 Architecture & Design      75% ███████████████░░░░░ 25%
-Implementation              2% █░░░░░░░░░░░░░░░░░░░ 98%
+Implementation              5% █░░░░░░░░░░░░░░░░░░░ 95%
 Testing                    90% ██████████████████░░ 10%
-Documentation              25% █████░░░░░░░░░░░░░░░ 75%
+Documentation              35% ███████░░░░░░░░░░░░░ 65%
 ```
 ***Humorous aside:***  
 These were not the original approximations but Claude expressed that some were "**generous** to the human side," adding "*and I can back that up from the repository.*"  Girl came with RECEIPTS, lol.
