@@ -58,10 +58,10 @@ jobs:
             "$RUNNER_TEMP/repo" \
             "Ripples-${VERSION}-${{ matrix.arch }}.flatpak" "$APP_ID"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: ripples-${{ matrix.arch }}
           path: Ripples-*.flatpak
+          archive: false
           if-no-files-found: error
 
   release:
@@ -71,9 +71,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
-          pattern: ripples-*
+          pattern: Ripples-*
           merge-multiple: true
 
       - name: Publish release
@@ -81,6 +81,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          # Fixed names give stable URLs under /releases/latest/download/.
+          for arch in x86_64 aarch64; do
+            cp "Ripples-${GITHUB_REF_NAME}-${arch}.flatpak" "Ripples-${arch}-latest.flatpak"
+          done
+          # A tag with a hyphen (v0.1.0-rc1) is a pre-release and never "latest".
+          flags=()
+          [[ "$GITHUB_REF_NAME" == *-* ]] && flags+=(--prerelease)
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes "${flags[@]}"
           gh release upload "$GITHUB_REF_NAME" Ripples-*.flatpak --clobber
