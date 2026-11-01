@@ -10,7 +10,8 @@
 // Every function here fails soft, on purpose: a network error, a
 // malformed response, a server that simply doesn't have notify_push
 // installed -- none of it is treated as a hard error anywhere in this
-// file. Both tiers are optional, additive optimizations layered on top
+// file. discover_capabilities alone distinguishes an indeterminate answer
+// (None) from a definitive absence so callers can retry the former. Both tiers are optional, additive optimizations layered on top
 // of a full crawl that already works correctly without either of them,
 // so "couldn't confirm this optimization is available" always means
 // "fall back to what already works," never "propagate an error that
@@ -43,7 +44,7 @@ use crate::webdav;
 /// internally, so it is advised that you create one and reuse it").
 /// Less impactful here than there given how infrequently this module's
 /// own calls actually happen (see run_blocking's own doc comment --
-/// capabilities discovery once per connection per session, the ETag
+/// capabilities discovery until a definitive answer, the ETag
 /// check once per round), but the same real cost applies regardless:
 /// every call through a freshly-built client pays a full TCP+TLS
 /// handshake it wouldn't need to if a live connection to the same host
@@ -64,7 +65,7 @@ fn client() -> reqwest::blocking::Client {
 /// would otherwise block glib's own MainContext -- and with it, the
 /// entire UI -- if called directly from an async function running on
 /// it. Only ever used for occasional, one-shot calls (capabilities
-/// discovery once per connection per session, the ETag check once per
+/// discovery until a definitive answer, the ETag check once per
 /// round), not anything high-frequency enough for a fresh thread per
 /// call to be wasteful.
 pub async fn run_blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
@@ -103,16 +104,16 @@ pub struct PushCapabilities {
     pub theme: Option<crate::config::ServerTheme>,
 }
 
-/// Hits the server's own OCS capabilities endpoint once -- a single,
-/// cheap GET, not part of the regular sync round's own file/directory
-/// traffic at all. Must be authenticated -- confirmed directly (not
-/// assumed) that an anonymous request to this exact endpoint never
-/// includes the notify_push block at all, even when the app is
-/// genuinely installed and working; only a request authenticated as a
-/// real account gets it. See this module's own top-level doc comment
-/// for why every failure path here returns PushCapabilities::default()
-/// (nothing available) rather than propagating an error.
-pub fn discover_capabilities(server_url: &str, username: &str, password: &str) -> PushCapabilities {
+/// Hits the server's own OCS capabilities endpoint once. The request must
+/// be authenticated: an anonymous response omits the notify_push block even
+/// when the app is installed.
+///
+/// Returns `None` when the answer is indeterminate (transport error,
+/// timeout, non-2xx status other than 404, unparseable 2xx body), so the
+/// caller can retry. Returns `Some(PushCapabilities::default())` when the
+/// server definitively lacks the endpoint (404, or a response without a
+/// `capabilities` object).
+pub fn discover_capabilities(server_url: &str, username: &str, password: &str) -> Option<PushCapabilities> {
     let url = format!("{}/ocs/v2.php/cloud/capabilities", server_url.trim_end_matches('/'));
     let result = client().get(&url)
         .basic_auth(username, Some(password))
@@ -120,25 +121,20 @@ pub fn discover_capabilities(server_url: &str, username: &str, password: &str) -
         .header("OCS-APIRequest", "true")
         .send();
 
-    let response = match result {
-        Ok(r) => r,
-        Err(_) => return PushCapabilities::default(),
-    };
-    let Ok(text) = response.text() else {
-        return PushCapabilities::default();
-    };
-    let json: serde_json::Value = match serde_json::from_str(&text) {
-        Ok(j) => j,
-        Err(_) => return PushCapabilities::default(),
-    };
+    let response = result.ok()?;
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Some(PushCapabilities::default());
+    }
+    if !status.is_success() {
+        return None;
+    }
+    let text = response.text().ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
 
     let capabilities = &json["ocs"]["data"]["capabilities"];
     if !capabilities.is_object() {
-        // No capabilities object at all in an otherwise-successful
-        // response is itself informative -- not a Nextcloud/ownCloud
-        // server (or at least not one behaving as expected), so nothing
-        // here can be trusted either.
-        return PushCapabilities::default();
+        return Some(PushCapabilities::default());
     }
 
     let theming = &capabilities["theming"];
@@ -179,12 +175,12 @@ pub fn discover_capabilities(server_url: &str, username: &str, password: &str) -
     let (background, background_text) = safe_color_pair(get("background"), get("background-text"), &primary, &primary_text);
 
     let notify_push = &capabilities["notify_push"];
-    PushCapabilities {
+    Some(PushCapabilities {
         websocket_url: notify_push["endpoints"]["websocket"].as_str().map(String::from),
         pre_auth_url: notify_push["endpoints"]["pre_auth"].as_str().map(String::from),
         is_nextcloud_or_owncloud: true,
         theme: has_real_theming.then(|| crate::config::ServerTheme { background, background_text, primary, primary_text }),
-    }
+    })
 }
 
 /// Whether `s` is a well-formed "#rrggbb" hex color string -- anything

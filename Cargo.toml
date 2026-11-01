@@ -49,6 +49,8 @@ zeroize = "1"
 # Selects the Secret Service backend on a normal session and a file backend
 # under Flatpak. async-std rather than the default tokio, to avoid a second runtime.
 oo7 = { version = "0.6", default-features = false, features = ["native_crypto", "async-std"] }
+# Background portal autostart under Flatpak (sandbox.rs). Already in the tree via oo7.
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "background"] }
 # PROPFIND multistatus parsing in webdav.rs. Matched on local_name() so any
 # namespace prefix works.
 quick-xml = "0.36"

@@ -1,6 +1,5 @@
 //! Persistent, on-disk logging -- a genuine, permanent record of what
-//! this app did, surviving both app restarts and the in-app StatusLog's
-//! own, bounded ring-buffer cap (see status.rs). One file per session
+//! this app did, surviving app restarts. One file per session
 //! (or per mid-session rotation -- see should_rotate's own doc comment),
 //! written with buffered, infrequent, event-driven flushes rather than
 //! either a continuous per-line write (real, unnecessary disk/battery
@@ -26,8 +25,7 @@ const MAX_SESSION_FILES: usize = 30;
 
 /// Mid-session rotation threshold -- see should_rotate. 20MB is well
 /// past what even a very active, long-running session accumulates in
-/// normal operation (the in-app StatusLog's own 20000-line cap is
-/// itself only a few MB at typical line lengths), so this exists purely
+/// normal operation (a few MB at typical line lengths), so this exists purely
 /// as a backstop against the pathological case this feature was
 /// explicitly built to survive -- a session that's still running weeks
 /// or months later -- rather than something expected to fire in
@@ -111,9 +109,7 @@ pub fn prune_old_sessions() {
 /// prune_old_sessions -- a disk-log write failing shouldn't ever be
 /// treated as seriously as, say, a journal write failing, since nothing
 /// about the app's actual sync correctness depends on this file existing
-/// at all; it's a diagnostic convenience layered on top; the in-app
-/// StatusLog remains the source of truth for anything the running app
-/// itself needs to reason about.
+/// at all; it's a diagnostic convenience layered on top.
 pub fn append_lines(path: &Path, lines: &[String]) -> std::io::Result<()> {
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;

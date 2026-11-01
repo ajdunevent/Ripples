@@ -7,3 +7,8 @@
 .swo
 *~
 TODO.md
+
+# Flatpak build output
+/.flatpak/
+/.flatpak-builder/
+/dist/

@@ -1,0 +1,5 @@
+# Build output. Names match direct children of this directory only.
+target
+dist
+.flatpak
+.flatpak-builder

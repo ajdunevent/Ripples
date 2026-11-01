@@ -8,6 +8,7 @@ mod goa;
 mod journal;
 mod nextcloud_login;
 mod push;
+mod sandbox;
 mod status;
 mod sync;
 mod tray;
@@ -200,12 +201,15 @@ struct WindowWidgets {
     // separate section entirely, by request).
     connections_list: gtk4::ListBox,
     status_row: libadwaita::ActionRow,
-    status_log_label: gtk4::TextView,
     active_transfers_row: libadwaita::ExpanderRow,
     conflicts_row: libadwaita::ActionRow,
     conflicts_icon: gtk4::Image,
-    export_log_button: gtk4::Button,
-    clear_log_button: gtk4::Button,
+    view_log_button: gtk4::Button,
+    log_view: gtk4::TextView,
+    capabilities_row: libadwaita::ExpanderRow,
+    etag_cap_row: CapabilityRow,
+    notify_push_cap_row: CapabilityRow,
+    theming_cap_row: CapabilityRow,
     sync_now_button: gtk4::Button,
     pause_button: gtk4::Button,
     // Needed by apply_server_theme to switch top_bar_style between
@@ -424,12 +428,11 @@ struct AppState {
     syncing: Cell<bool>,
     // Status/log event bus: sync.rs sends structured SyncEvents here as it
     // works; a background task in run_background folds them into
-    // sync_state + status_log below and refreshes the Status tab. The
+    // sync_state and the disk log and refreshes the Status tab. The
     // receiver lives in a RefCell<Option<..>> purely so it can be moved
     // out (taken) once at startup -- same pattern as hold_guard.
     status_events_tx: async_channel::Sender<status::SyncEvent>,
     status_events_rx: RefCell<Option<async_channel::Receiver<status::SyncEvent>>>,
-    status_log: RefCell<status::StatusLog>,
     // Current session's own on-disk log file -- see disk_log.rs. A
     // RefCell<PathBuf>, not a one-time-computed constant, since
     // disk_log::should_rotate can mean this changes mid-session (a new,
@@ -439,9 +442,6 @@ struct AppState {
     disk_log_path: RefCell<PathBuf>,
     // Lines accumulated since the last actual flush to disk_log_path --
     // drained (not just read) every time the flush timer below fires.
-    // Deliberately separate from status_log's own Vec/VecDeque, not an
-    // index into it, since status_log's own ring-buffer eviction would
-    // otherwise invalidate any such index the moment the cap is hit.
     disk_log_pending: RefCell<Vec<String>>,
     // Whether a flush timer is currently counting down -- see
     // apply_status_event's own use of this. Sole purpose: a burst of
@@ -795,14 +795,27 @@ struct AppState {
     // it's coalesced into exactly one, deferred decision once the dust
     // settles, rather than dropped entirely.
     coalesced_notify_push_pending: Rc<Cell<bool>>,
-    // Whether push::discover_capabilities has already been run for this
-    // account this session -- once per account per session, not once
-    // per connection or once per round, since a server's own
-    // capabilities don't change during a single run of this app, and
-    // every connection under one account necessarily shares that same
-    // server. See notify_push_status's own doc comment for the
-    // redundancy this consolidation fixes.
+    // Accounts whose push::discover_capabilities call has returned a
+    // definitive answer this session. Failed or indeterminate attempts
+    // leave the account unmarked so a later round retries.
     capabilities_checked: Rc<RefCell<std::collections::HashSet<String>>>,
+    // Accounts with a discovery request currently awaiting a response.
+    capabilities_in_flight: RefCell<HashSet<String>>,
+    // Per-session results of the definitive capability check, read by
+    // refresh_capabilities_ui. Absent until the account is checked.
+    theming_available: RefCell<HashMap<String, bool>>,
+    notify_push_installed: RefCell<HashMap<String, bool>>,
+    // Set once the first entry of this session has been written to the
+    // disk log. Enables the View Log row.
+    log_has_entries: Cell<bool>,
+    // Last LOG_PREVIEW_LINES lines shown in the Session tab's log preview.
+    status_log_ring: RefCell<std::collections::VecDeque<String>>,
+    // Lines not yet inserted into the preview widget.
+    status_log_pending: RefCell<Vec<String>>,
+    status_log_flush_armed: Cell<bool>,
+    // The preview widget must be rebuilt from the ring before the next
+    // incremental insert, because it was not visible for earlier lines.
+    status_log_needs_rebuild: Cell<bool>,
     // Given to every spawned push::run_listener thread (one per
     // connection with a live notify_push connection) so it can request a
     // fresh password from the main, glib-driven thread -- see
@@ -859,32 +872,33 @@ fn autostart_desktop_path() -> PathBuf {
 /// as an autostart entry in the first place -- without it, every login
 /// would pop the window open unprompted, which isn't what "launch in
 /// the background" should mean.
-fn ensure_autostart(enabled: bool) {
+async fn ensure_autostart(enabled: bool, user_initiated: bool) -> Result<(), String> {
+    if sandbox::is_flatpak() {
+        // The first portal call prompts for background permission, even
+        // when disabling. Launch-time sync with autostart off skips it.
+        if !enabled && !user_initiated {
+            return Ok(());
+        }
+        return sandbox::set_autostart(enabled).await;
+    }
+
     let path = autostart_desktop_path();
     if !enabled {
         // Not finding it is fine -- already off, nothing to remove.
         let _ = std::fs::remove_file(&path);
-        return;
+        return Ok(());
     }
 
-    let Some(parent) = path.parent() else { return };
-    if let Err(e) = std::fs::create_dir_all(parent) {
-        eprintln!("couldn't create autostart directory: {e}");
-        return;
-    }
+    let Some(parent) = path.parent() else { return Ok(()) };
+    std::fs::create_dir_all(parent).map_err(|e| format!("couldn't create autostart directory: {e}"))?;
 
-    let Ok(exe) = std::env::current_exe() else {
-        eprintln!("couldn't determine own executable path for autostart entry");
-        return;
-    };
+    let exe = std::env::current_exe().map_err(|e| format!("couldn't determine own executable path for autostart entry: {e}"))?;
 
     let contents = format!(
         "[Desktop Entry]\nType=Application\nVersion=1.0\nName=Ripples\nComment=Sync client for Nextcloud, ownCloud, and WebDAV\nExec={} --hidden\nX-GNOME-Autostart-enabled=true\nNoDisplay=true\nTerminal=false\n",
         exe.display()
     );
-    if let Err(e) = std::fs::write(&path, contents) {
-        eprintln!("couldn't write autostart entry: {e}");
-    }
+    std::fs::write(&path, contents).map_err(|e| format!("couldn't write autostart entry: {e}"))
 }
 
 fn main() -> glib::ExitCode {
@@ -1037,7 +1051,6 @@ fn ensure_state_initialized(state_holder: &Rc<RefCell<Option<Rc<AppState>>>>) ->
         syncing: Cell::new(false),
         status_events_tx,
         status_events_rx: RefCell::new(Some(status_events_rx)),
-        status_log: RefCell::new(status::StatusLog::new()),
         disk_log_path: RefCell::new(disk_log::new_session_path()),
         disk_log_pending: RefCell::new(Vec::new()),
         disk_log_flush_armed: Cell::new(false),
@@ -1073,6 +1086,14 @@ fn ensure_state_initialized(state_holder: &Rc<RefCell<Option<Rc<AppState>>>>) ->
         dirty_connections: Rc::new(RefCell::new(HashSet::new())),
         coalesced_notify_push_pending: Rc::new(Cell::new(false)),
         capabilities_checked: Rc::new(RefCell::new(std::collections::HashSet::new())),
+        capabilities_in_flight: RefCell::new(HashSet::new()),
+        theming_available: RefCell::new(HashMap::new()),
+        notify_push_installed: RefCell::new(HashMap::new()),
+        log_has_entries: Cell::new(false),
+        status_log_ring: RefCell::new(std::collections::VecDeque::new()),
+        status_log_pending: RefCell::new(Vec::new()),
+        status_log_flush_armed: Cell::new(false),
+        status_log_needs_rebuild: Cell::new(true),
         push_password_requests_tx: RefCell::new(None),
         push_events_tx: RefCell::new(None),
         pending_sync_actions: RefCell::new(Vec::new()),
@@ -1085,7 +1106,14 @@ fn ensure_state_initialized(state_holder: &Rc<RefCell<Option<Rc<AppState>>>>) ->
     // std::env::current_exe() every time, not written once and left
     // stale) the same way the rest of this app prefers recomputing
     // ground truth over trusting a value written once.
-    ensure_autostart(state.config.borrow().launch_on_startup);
+    {
+        let enabled = state.config.borrow().launch_on_startup;
+        glib::spawn_future_local(async move {
+            if let Err(e) = ensure_autostart(enabled, false).await {
+                eprintln!("{e}");
+            }
+        });
+    }
     // Same "apply the loaded value once, here, at startup" reasoning --
     // the Settings row's own handler only fires on a subsequent user
     // edit, so whatever was actually loaded from disk needs this too,
@@ -1535,89 +1563,113 @@ fn view_stack_add(
     page.set_icon_name(Some(icon_name));
 }
 
-fn build_status_tab() -> (gtk4::ScrolledWindow, libadwaita::ActionRow, gtk4::TextView, libadwaita::ExpanderRow, libadwaita::ActionRow, gtk4::Image, gtk4::Button, gtk4::Button, gtk4::Button, gtk4::Button) {
-    // Plain row, not clickable -- there's nothing to expand/collapse
-    // anymore now that the log always shows in its own section below,
-    // so this is just a title+subtitle summary.
+/// Widgets of the Session tab that later code reads or updates.
+struct StatusTab {
+    page: gtk4::ScrolledWindow,
+    status_row: libadwaita::ActionRow,
+    active_transfers_row: libadwaita::ExpanderRow,
+    conflicts_row: libadwaita::ActionRow,
+    conflicts_icon: gtk4::Image,
+    view_log_button: gtk4::Button,
+    log_view: gtk4::TextView,
+    sync_now_button: gtk4::Button,
+    pause_button: gtk4::Button,
+}
+
+/// Widgets of the Connections tab that later code reads or updates.
+struct ConnectionsTab {
+    page: libadwaita::PreferencesPage,
+    account_section: gtk4::ListBox,
+    connections_list: gtk4::ListBox,
+    capabilities_row: libadwaita::ExpanderRow,
+    etag_cap_row: CapabilityRow,
+    notify_push_cap_row: CapabilityRow,
+    theming_cap_row: CapabilityRow,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CapabilityState {
+    Checking,
+    Available,
+    Unavailable,
+}
+
+impl CapabilityState {
+    fn text(self) -> &'static str {
+        match self {
+            CapabilityState::Checking => "Checking\u{2026}",
+            CapabilityState::Available => "Available",
+            CapabilityState::Unavailable => "Unavailable",
+        }
+    }
+}
+
+/// A Capabilities child row whose right-aligned suffix shows the state as
+/// an icon. The text is exposed through the tooltip and accessible label.
+#[derive(Clone)]
+struct CapabilityRow {
+    row: libadwaita::ActionRow,
+    indicator: gtk4::Stack,
+}
+
+impl CapabilityRow {
+    fn new(title: &str) -> Self {
+        let row = libadwaita::ActionRow::builder().title(title).build();
+        let spinner = gtk4::Spinner::new();
+        spinner.set_spinning(true);
+        let available = gtk4::Image::from_icon_name("emblem-ok-symbolic");
+        available.add_css_class("success");
+        let unavailable = gtk4::Image::from_icon_name("process-stop-symbolic");
+        unavailable.add_css_class("dim-label");
+        let indicator = gtk4::Stack::builder().valign(gtk4::Align::Center).build();
+        indicator.add_named(&spinner, Some("checking"));
+        indicator.add_named(&available, Some("available"));
+        indicator.add_named(&unavailable, Some("unavailable"));
+        action_row_add_suffix(&row, &indicator);
+        let this = Self { row, indicator };
+        this.set(CapabilityState::Checking);
+        this
+    }
+
+    fn set(&self, state: CapabilityState) {
+        let name = match state {
+            CapabilityState::Checking => "checking",
+            CapabilityState::Available => "available",
+            CapabilityState::Unavailable => "unavailable",
+        };
+        self.indicator.set_visible_child_name(name);
+        self.indicator.set_tooltip_text(Some(state.text()));
+        self.indicator.update_property(&[gtk4::accessible::Property::Label(state.text())]);
+    }
+}
+
+/// Maximum number of lines kept for the log preview. The widget shows only
+/// the lines that fit, so the ring only has to exceed any window height.
+const LOG_PREVIEW_LINES: usize = 250;
+const LOG_PREVIEW_FLUSH_MS: u64 = 500;
+
+fn build_status_tab() -> StatusTab {
     let status_row = libadwaita::ActionRow::builder()
         .title("Starting\u{2026}")
         .build();
-    // Always activatable, even at zero conflicts -- simpler than toggling
-    // it on every refresh, and harmless: opening the resolver with
-    // nothing pending is just a no-op (see
-    // show_sync_issues_dialog's own early return). Subtitle text
-    // is the only thing refresh_conflicts_ui actually needs to update.
-    //
-    // Suffix icon is window-new-symbolic -- reads unambiguously as "opens
-    // in another window," distinct from a menu trigger (the earlier
-    // view-more-symbolic read as a hamburger/kebab menu, not a dialog
-    // launcher).
-    // Always visible now, not hidden at zero -- see refresh_active_transfers_ui's
-    // own "None" subtitle at zero for why: an always-visible row that
-    // sometimes reads "None" rather than blipping in and out of the
-    // status page was a deliberate, requested change.
     let active_transfers_row = libadwaita::ExpanderRow::builder()
         .title("Active File Transfers")
         .build();
 
     let conflicts_row = libadwaita::ActionRow::builder()
         .title("Sync Issues")
-        .activatable(true)
-        // Always visible now, not hidden at zero -- see
-        // refresh_conflicts_ui's own "None" subtitle at zero for why.
         .build();
-    // window-new-symbolic (the previous icon here) evidently renders in
-    // at least some icon themes as a rectangle with a plus sign -- reads
-    // as "add a conflict" rather than "open the resolver," backwards
-    // from the intent. object-select-symbolic (a plain checkmark) is a
-    // long-standing, near-universal Adwaita/GNOME icon name; unlike
-    // library APIs, icon-theme membership isn't something checkable
-    // against crate source, so this is a best-effort pick worth
-    // confirming on a real render rather than something verified the
-    // way everything else in this file has been.
-    //
-    // Opacity-dimmed at zero, not full-opacity regardless of count -- see
-    // refresh_conflicts_ui's own comment on this: the row itself stays
-    // visible even with nothing to resolve (showing "None"), so the icon
-    // needs its own way to distinguish that from the "issues need
-    // attention" state. The click itself is still safely gated
-    // regardless -- see show_sync_issues_dialog's own early return on an
-    // empty list.
-    let conflicts_icon = gtk4::Image::from_icon_name("object-select-symbolic");
+    let conflicts_icon = gtk4::Image::new();
     conflicts_icon.set_tooltip_text(Some("Resolve"));
     action_row_add_suffix(&conflicts_row, &conflicts_icon);
+    set_conflicts_row_state(&conflicts_row, &conflicts_icon, false);
 
-    // Plain ListBox + "boxed-list" instead of AdwPreferencesGroup/
-    // PreferencesPage -- the same pattern already used for the
-    // connections/exclusions lists elsewhere in this file. Switched to
-    // deliberately, not just for consistency: PreferencesPage has its
-    // own internal scrolling built in, sized on its own terms, which
-    // turned out to still let Status/Conflicts get compressed under the
-    // log even wrapped in an outer ScrolledWindow -- a plain ListBox's
-    // minimum size more directly reflects its rows' actual minimum
-    // height, with no second, less-transparent scrolling behavior
-    // fighting the outer one for control of the space.
-    let status_title = gtk4::Label::builder()
-        .label("Status")
-        .xalign(0.0)
-        .css_classes(["heading"])
-        .margin_start(12).margin_end(12).margin_top(12)
-        .build();
-    let status_list = gtk4::ListBox::builder()
-        .selection_mode(gtk4::SelectionMode::None)
-        .css_classes(["boxed-list"])
-        .margin_start(12).margin_end(12).margin_bottom(12)
-        .build();
-    status_list.append(&status_row);
-    status_list.append(&active_transfers_row);
-    status_list.append(&conflicts_row);
+    let status_group = libadwaita::PreferencesGroup::builder().title("Status").build();
+    preferences_group_add(&status_group, &status_row);
+    preferences_group_add(&status_group, &conflicts_row);
+    preferences_group_add(&status_group, &active_transfers_row);
 
-    // Sync Now, as an icon suffix directly on status_row, immediately to
-    // the left of pause_button below (added first, since ActionRow lays
-    // out suffixes left-to-right in the order they're added) -- a plain,
-    // explicit "check right now" alongside the existing pause/resume
-    // toggle, rather than only ever waiting on whatever the next
-    // scheduled round's own timing happens to be.
+    // Sync Now and Pause sit left to right in the order added.
     let sync_now_button = gtk4::Button::builder()
         .icon_name("view-refresh-symbolic")
         .valign(gtk4::Align::Center)
@@ -1626,13 +1678,7 @@ fn build_status_tab() -> (gtk4::ScrolledWindow, libadwaita::ActionRow, gtk4::Tex
         .build();
     action_row_add_suffix(&status_row, &sync_now_button);
 
-    // Manual pause, as an icon-toggle suffix directly on status_row --
-    // not a separate row (an earlier version added one; this replaces
-    // it per feedback that it belonged on the same row as the status
-    // text itself, e.g. "Idle"). Icon alone toggles between
-    // pause/play, updated in update_status_ui alongside status_row's
-    // own title/subtitle rather than a text label needing its own
-    // separate update site.
+    // The icon toggles between pause and play in update_status_ui.
     let pause_button = gtk4::Button::builder()
         .icon_name("media-playback-pause-symbolic")
         .valign(gtk4::Align::Center)
@@ -1641,110 +1687,100 @@ fn build_status_tab() -> (gtk4::ScrolledWindow, libadwaita::ActionRow, gtk4::Tex
         .build();
     action_row_add_suffix(&status_row, &pause_button);
 
-    // TextView, not Label -- the more appropriate widget for read-only,
-    // potentially-large, multi-line text that the user should be able
-    // to select and copy from (e.g. to share a line or two directly).
-    // Label has no text-selection support at all; TextView is GTK4's
-    // own, genuinely intended widget for exactly this shape of content,
-    // not just a Label with a property flipped on.
-    let log_label = gtk4::TextView::builder()
-        // No wrapping: log lines are full of long unbroken paths, and
-        // wrapping them (even at WordChar granularity) turns one logical
-        // line into several visual ones, which is worse to scan than
-        // scrolling right for the ones that need it.
+    let log_view = gtk4::TextView::builder()
+        // Long lines scroll horizontally instead of wrapping.
         .wrap_mode(gtk4::WrapMode::None)
         .editable(false)
-        // No blinking text-entry cursor in a read-only view -- text
-        // selection itself (click-drag, double-click-word, Ctrl+A, etc.)
-        // works the same regardless of this.
         .cursor_visible(false)
         .left_margin(12)
         .right_margin(12)
         .top_margin(6)
         .bottom_margin(6)
-        .css_classes(["monospace", "sync-log-text"])
+        .css_classes(["monospace"])
         .build();
-    apply_log_text_css();
-
+    // External vertical policy: the scroller does not grow to the content's
+    // height, so only the last lines that fit are visible.
     let log_scroller = gtk4::ScrolledWindow::builder()
-        .child(&log_label)
+        .child(&log_view)
         .hscrollbar_policy(gtk4::PolicyType::Automatic)
-        .vscrollbar_policy(gtk4::PolicyType::Automatic)
-        .min_content_height(60)
+        .vscrollbar_policy(gtk4::PolicyType::External)
+        .min_content_height(72)
         .vexpand(true)
         .build();
+    // Pinned to the newest line: any change to the range or the position
+    // snaps back to the bottom.
+    let vadjustment = log_scroller.vadjustment();
+    let pin_to_bottom = |adjustment: &gtk4::Adjustment| {
+        let bottom = adjustment.upper() - adjustment.page_size();
+        if (adjustment.value() - bottom).abs() > 0.5 {
+            adjustment.set_value(bottom);
+        }
+    };
+    vadjustment.connect_changed(move |adjustment| pin_to_bottom(adjustment));
+    vadjustment.connect_value_changed(move |adjustment| pin_to_bottom(adjustment));
 
-    let export_log_button = gtk4::Button::builder()
-        .icon_name("document-save-symbolic")
-        .valign(gtk4::Align::Center)
-        .tooltip_text("Save log to file")
-        .css_classes(["flat"])
-        .sensitive(false) // nothing logged yet -- update_status_ui enables it once there's real content
+    let log_card = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .css_classes(["card"])
+        .vexpand(true)
         .build();
-    let clear_log_button = gtk4::Button::builder()
-        .icon_name("edit-delete-symbolic")
-        .valign(gtk4::Align::Center)
-        .tooltip_text("Clear log")
+    log_card.append(&log_scroller);
+
+    let view_log_content = gtk4::Box::builder().spacing(6).build();
+    view_log_content.append(&gtk4::Label::new(Some("View Full Log")));
+    view_log_content.append(&gtk4::Image::from_icon_name("adw-external-link-symbolic"));
+    let view_log_button = gtk4::Button::builder()
+        .child(&view_log_content)
         .css_classes(["flat"])
-        .sensitive(false) // nothing logged yet -- update_status_ui enables it once there's real content
+        .halign(gtk4::Align::End)
+        .sensitive(false)
         .build();
 
-    // "Log" now sits outside the card, as its own heading -- a true
-    // sibling of the card, the same way "Status" sits above status_list
-    // rather than inside it.
     let log_title = gtk4::Label::builder()
         .label("Log")
         .xalign(0.0)
         .css_classes(["heading"])
-        .margin_start(12).margin_end(12).margin_top(12)
         .build();
-
-    let log_footer_row = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .halign(gtk4::Align::End)
-        .margin_end(6).margin_bottom(6)
-        .build();
-    log_footer_row.append(&clear_log_button);
-    log_footer_row.append(&export_log_button);
-
-    // "card" is a standard Adwaita style class (rounded corners, subtle
-    // background) -- CSS, not something checkable against the Rust API
-    // surface the way widget methods are, but it's the conventional way
-    // to give a plain GtkBox the same "settings section" look
-    // PreferencesGroup gives its own rows for free. Only the log
-    // contents and export button live inside it now -- the heading is a
-    // sibling above, not a child.
     let log_section = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
-        .css_classes(["card"])
-        .margin_start(12).margin_end(12).margin_bottom(12)
+        .spacing(12)
         .vexpand(true)
         .build();
-    log_section.append(&log_scroller);
-    log_section.append(&log_footer_row);
+    log_section.append(&log_title);
+    log_section.append(&log_card);
+    log_section.append(&view_log_button);
 
-    let status_tab = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).spacing(6).build();
-    status_tab.append(&status_title);
-    status_tab.append(&status_list);
-    status_tab.append(&log_title);
-    status_tab.append(&log_section);
+    let content = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(24)
+        .margin_top(24)
+        .margin_bottom(24)
+        .margin_start(12)
+        .margin_end(12)
+        .vexpand(true)
+        .build();
+    content.append(&status_group);
+    content.append(&log_section);
 
-    // A plain GtkBox compresses ALL its children, including non-expand
-    // ones, once there isn't enough height for everyone's natural size --
-    // "non-expand" only means "don't grow to claim extra space," not
-    // "never shrink below natural size." This outer ScrolledWindow is
-    // the safety net: above the combined minimum height, everything
-    // behaves exactly as before (log dynamically fills remaining space);
-    // below it, the page scrolls instead of squeezing Status/Conflicts
-    // into overlap.
-    let status_scroller = gtk4::ScrolledWindow::builder()
-        .child(&status_tab)
+    // Same width limits as AdwPreferencesPage, so this tab lines up with the others.
+    let clamp = libadwaita::Clamp::builder()
+        .maximum_size(600)
+        .tightening_threshold(400)
+        .child(&content)
+        .build();
+    // The outer scroller takes over when the window is too short for the
+    // groups plus the log's minimum height.
+    let page = gtk4::ScrolledWindow::builder()
+        .child(&clamp)
         .hscrollbar_policy(gtk4::PolicyType::Never)
         .vscrollbar_policy(gtk4::PolicyType::Automatic)
         .vexpand(true)
         .build();
 
-    (status_scroller, status_row, log_label, active_transfers_row, conflicts_row, conflicts_icon, export_log_button, clear_log_button, sync_now_button, pause_button)
+    StatusTab {
+        page, status_row, active_transfers_row, conflicts_row, conflicts_icon, view_log_button,
+        log_view, sync_now_button, pause_button,
+    }
 }
 
 /// .pill turned out to be documented as a BUTTON-only style class in
@@ -1755,32 +1791,13 @@ fn build_status_tab() -> (gtk4::ScrolledWindow, libadwaita::ActionRow, gtk4::Tex
 /// small custom rule giving the label actual rounded-pill geometry,
 /// independent of that button-only class. Same "applied once per
 /// process, GTK dedupes an identical provider added twice" pattern as
-/// apply_log_text_css below -- colors are a first-pass guess (accent-
-/// tinted, theme-adaptive via named colors rather than a hardcoded
-/// value) not something rendered and checked visually here.
+/// other CSS providers here. Colors use accent-tinted named colors so they
+/// follow the theme.
 fn apply_auto_removable_badge_css() {
     let provider = gtk4::CssProvider::new();
     provider.load_from_string(
         ".auto-removable-badge { border-radius: 999px; padding: 1px 9px; font-size: 0.85em; background-color: alpha(@accent_bg_color, 0.15); color: @accent_color; }"
     );
-    gtk4::style_context_add_provider_for_display(
-        &gtk4::gdk::Display::default().expect("a display exists by the time any widget is being built"),
-        &provider,
-        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
-}
-
-/// "caption" is the smallest built-in Adwaita text style class; there's
-/// no smaller one to reach for, so getting the log a size below that
-/// needs a real CSS provider. Applied once per process (GTK dedupes an
-/// identical provider added twice, but there's no reason to even try --
-/// this only ever needs adding once, at the point the label asking for
-/// it is first built). 0.8em turned out too aggressive in practice --
-/// 0.95em keeps it slightly denser than body text (still useful for a
-/// log full of long paths) without being hard to read.
-fn apply_log_text_css() {
-    let provider = gtk4::CssProvider::new();
-    provider.load_from_string(".sync-log-text { font-size: 0.95em; }");
     gtk4::style_context_add_provider_for_display(
         &gtk4::gdk::Display::default().expect("a display exists by the time any widget is being built"),
         &provider,
@@ -1907,7 +1924,7 @@ fn find_overlapping_remote_connection<'a>(connections: &'a [config::SyncConnecti
         })
 }
 
-fn build_connections_tab() -> (libadwaita::PreferencesPage, gtk4::ListBox, gtk4::ListBox) {
+fn build_connections_tab() -> ConnectionsTab {
     // Rebuilt fresh by refresh_account_ui on every call -- starts empty,
     // filled in there. See account_section's own doc comment on
     // WindowWidgets. A ListBox with the same "boxed-list" styling
@@ -1921,6 +1938,18 @@ fn build_connections_tab() -> (libadwaita::PreferencesPage, gtk4::ListBox, gtk4:
         .selection_mode(gtk4::SelectionMode::None)
         .css_classes(["boxed-list"])
         .build();
+    // Appended after the account row by refresh_account_ui, which rebuilds
+    // the rest of the list.
+    let etag_cap_row = CapabilityRow::new("ETag");
+    let notify_push_cap_row = CapabilityRow::new("notify_push");
+    let theming_cap_row = CapabilityRow::new("Theming");
+    let capabilities_row = libadwaita::ExpanderRow::builder()
+        .title("Server Capabilities")
+        .expanded(false)
+        .build();
+    capabilities_row.add_row(&etag_cap_row.row);
+    capabilities_row.add_row(&notify_push_cap_row.row);
+    capabilities_row.add_row(&theming_cap_row.row);
     let account_group = libadwaita::PreferencesGroup::builder().title("Account").build();
     preferences_group_add(&account_group, &account_section);
 
@@ -1935,7 +1964,10 @@ fn build_connections_tab() -> (libadwaita::PreferencesPage, gtk4::ListBox, gtk4:
     preferences_page_add(&preferences_page, &account_group);
     preferences_page_add(&preferences_page, &connections_group);
 
-    (preferences_page, account_section, connections_list)
+    ConnectionsTab {
+        page: preferences_page, account_section, connections_list, capabilities_row,
+        etag_cap_row, notify_push_cap_row, theming_cap_row,
+    }
 }
 
 /// Rebuilds patterns_list's rows from config::effective_exclude_patterns
@@ -2149,7 +2181,7 @@ fn show_add_pattern_dialog(state: Rc<AppState>, patterns_list: gtk4::ListBox) {
         if existing.iter().any(|p| p.pattern == text) {
             return Some("Already in the list.".to_string());
         }
-        exclude::validate_global_pattern(text).err()
+        exclude::validate_pattern(text).err()
     };
 
     let update_validity = clone!(
@@ -2226,7 +2258,21 @@ fn build_settings_tab(app: &libadwaita::Application, state: &Rc<AppState>) -> (l
             save_config(&state);
             // Immediate effect, not just "takes effect next launch" --
             // same idempotent function main() itself calls at startup.
-            ensure_autostart(enabled);
+            glib::spawn_future_local(clone!(
+                #[strong] state,
+                #[weak] row,
+                async move {
+                    if let Err(e) = ensure_autostart(enabled, true).await {
+                        eprintln!("{e}");
+                        if enabled {
+                            // Re-enters this handler with enabled == false.
+                            state.config.borrow_mut().launch_on_startup = false;
+                            save_config(&state);
+                            row.set_active(false);
+                        }
+                    }
+                }
+            ));
         }
     ));
     preferences_group_add(&general_group, &startup_row);
@@ -2299,25 +2345,10 @@ fn build_settings_tab(app: &libadwaita::Application, state: &Rc<AppState>) -> (l
                 let Some(watcher) = state.watcher.borrow().clone() else { return };
                 let Some(account_id) = state.config.borrow().active_account_id.clone() else { return };
                 let Some(account) = all_accounts(&state, &watcher).into_iter().find(|a| a.account_id() == account_id) else { return };
-                let Some(server_url) = account.server_url() else { return };
+                if account.server_url().is_none() { return; }
                 let state = state.clone();
                 glib::MainContext::default().spawn_local(async move {
-                    let Some((_, username, password)) = account.credentials(&watcher).await else {
-                        if is_debug_enabled() {
-                            eprintln!("[{}] [debug] theme re-fetch (settings toggle): couldn't get credentials, aborting", now_hms());
-                        }
-                        return;
-                    };
-                    let password_str = password.as_str().to_string();
-                    let capabilities = push::run_blocking(move || push::discover_capabilities(&server_url, &username, &password_str)).await;
-                    if is_debug_enabled() {
-                        eprintln!("[{}] [debug] theme re-fetch (settings toggle): server returned theme={:?}", now_hms(), capabilities.theme);
-                    }
-                    if let Some(theme) = capabilities.theme {
-                        state.config.borrow_mut().cached_server_themes.insert(account_id, theme);
-                        save_config(&state);
-                    }
-                    apply_server_theme(&state);
+                    ensure_capabilities_and_theme(&state, &watcher, &account, true).await;
                 });
             }
         }
@@ -2481,7 +2512,7 @@ fn build_settings_tab(app: &libadwaita::Application, state: &Rc<AppState>) -> (l
                 // moment (the setting changing, not the network).
                 if !state.paused_for_metered.get() {
                     state.paused_for_metered.set(true);
-                    log_and_persist(&state, format!("[{}] Sync paused -- metered connection detected", now_hms()));
+                    log_line(&state, format!("[{}] Sync paused -- metered connection detected", now_hms()));
                 }
                 // Also confirmed as a real gap, distinct from the above:
                 // this alone only prevents the NEXT round from starting;
@@ -2499,7 +2530,7 @@ fn build_settings_tab(app: &libadwaita::Application, state: &Rc<AppState>) -> (l
                 // round, rather than resuming immediately -- the whole
                 // point of turning the setting off.
                 state.paused_for_metered.set(false);
-                log_and_persist(&state, format!("[{}] Sync resumed -- metered pausing disabled", now_hms()));
+                log_line(&state, format!("[{}] Sync resumed -- metered pausing disabled", now_hms()));
                 update_status_ui(&state, true);
                 // Safe to call immediately, not just schedule for later:
                 // paused_for_metered being true means state.syncing was
@@ -2540,13 +2571,13 @@ fn build_settings_tab(app: &libadwaita::Application, state: &Rc<AppState>) -> (l
             if enabled && currently_power_saving {
                 if !state.paused_for_power_save.get() {
                     state.paused_for_power_save.set(true);
-                    log_and_persist(&state, format!("[{}] Sync paused -- Power Save Mode is active", now_hms()));
+                    log_line(&state, format!("[{}] Sync paused -- Power Save Mode is active", now_hms()));
                     state.active_sync_cancels.borrow_mut().clear();
                     update_status_ui(&state, true);
                 }
             } else if state.paused_for_power_save.get() {
                 state.paused_for_power_save.set(false);
-                log_and_persist(&state, format!("[{}] Sync resumed -- Power Save Mode is no longer active", now_hms()));
+                log_line(&state, format!("[{}] Sync resumed -- Power Save Mode is no longer active", now_hms()));
                 update_status_ui(&state, true);
                 if let Some(watcher) = state.watcher.borrow().clone() {
                     glib::MainContext::default().spawn_local(clone!(
@@ -2697,7 +2728,7 @@ fn build_settings_tab(app: &libadwaita::Application, state: &Rc<AppState>) -> (l
     let patterns_group = libadwaita::PreferencesGroup::builder()
         .title("Ignored filename patterns")
         .description(
-            "Supports \"*\" and \"?\" wildcards. A trailing \"/\" matches directories only."
+            "Supports \"*\" and \"?\" wildcards. A trailing \"/\" matches directories only. A leading \"/\" matches from the root of the Sync Connection."
         )
         .build();
     preferences_group_add(&patterns_group, &patterns_box);
@@ -2715,7 +2746,7 @@ fn toggle_pause(state: &Rc<AppState>) {
     let now_paused = !state.paused_by_user.get();
     state.paused_by_user.set(now_paused);
     if now_paused {
-        log_and_persist(state, format!("[{}] Sync paused -- paused by user", now_hms()));
+        log_line(state, format!("[{}] Sync paused -- paused by user", now_hms()));
         // Without this, Pause only prevented the NEXT round from
         // starting -- a round already mid-flight when the button
         // was clicked kept running to completion regardless,
@@ -2732,7 +2763,7 @@ fn toggle_pause(state: &Rc<AppState>) {
         // just the next round.
         state.active_sync_cancels.borrow_mut().clear();
     } else {
-        log_and_persist(state, format!("[{}] Sync resumed -- resumed by user", now_hms()));
+        log_line(state, format!("[{}] Sync resumed -- resumed by user", now_hms()));
         // Cleared here, alongside paused_by_user itself -- see this
         // flag's own doc comment on AppState for why it can never
         // meaningfully outlive the pause it's describing.
@@ -2746,7 +2777,7 @@ fn toggle_pause(state: &Rc<AppState>) {
         // with no visible reason why -- confirmed as a real,
         // reported gap, not a hypothetical one.
         if state.paused_for_metered.get() {
-            log_and_persist(state, format!("[{}] Sync remains paused -- metered connection still detected", now_hms()));
+            log_line(state, format!("[{}] Sync remains paused -- metered connection still detected", now_hms()));
         }
         // Manual unpause is one of the two global triggers for
         // clearing every permission_error flag at once (the
@@ -2783,8 +2814,8 @@ fn build_or_present_window(app: &libadwaita::Application, state: &Rc<AppState>) 
         return;
     }
 
-    let (status_page, status_row, status_log_label, active_transfers_row, conflicts_row, conflicts_icon, export_log_button, clear_log_button, sync_now_button, pause_button) = build_status_tab();
-    let (connections_page, account_section, connections_list) = build_connections_tab();
+    let StatusTab { page: status_page, status_row, active_transfers_row, conflicts_row, conflicts_icon, view_log_button, log_view, sync_now_button, pause_button } = build_status_tab();
+    let ConnectionsTab { page: connections_page, account_section, connections_list, capabilities_row, etag_cap_row, notify_push_cap_row, theming_cap_row } = build_connections_tab();
     let (settings_page, theming_row) = build_settings_tab(app, state);
 
     let view_stack = libadwaita::ViewStack::new();
@@ -2808,26 +2839,17 @@ fn build_or_present_window(app: &libadwaita::Application, state: &Rc<AppState>) 
 
     let header_bar = libadwaita::HeaderBar::builder().title_widget(&view_switcher).build();
 
-    // Left side (pack_start), not right -- the right edge already has
-    // real window controls (minimize/maximize/close), and stacking a
-    // fourth thing there got visibly crowded. Left is otherwise empty at
-    // any window width, so this is a straightforward move, not a
-    // trade-off.
     let primary_menu = gio::Menu::new();
     primary_menu.append(Some("About Ripples"), Some("app.about"));
-    // Just "Quit" here -- in a menu, next to "About," the context already
-    // makes it obvious this is app-level, not a plain window close. If
-    // this ever also becomes a standalone button (Settings tab, or a
-    // future tray icon), that's the point to say more, e.g. "Quit
-    // Ripples" or similar -- a bare button out of context needs the
-    // extra word a menu item doesn't.
+    // Quit stays despite the HIG advice against it: the tray is optional, so
+    // the tray menu can't be the only way to stop the app.
     primary_menu.append(Some("Quit"), Some("app.quit"));
     let menu_button = gtk4::MenuButton::builder()
         .icon_name("open-menu-symbolic")
         .menu_model(&primary_menu)
         .tooltip_text("Main Menu")
         .build();
-    header_bar.pack_start(&menu_button);
+    header_bar.pack_end(&menu_button);
 
     let toolbar_view = libadwaita::ToolbarView::builder().content(&view_stack).build();
     // top_bar_style is no longer set here -- moved into apply_server_theme
@@ -2980,113 +3002,20 @@ fn build_or_present_window(app: &libadwaita::Application, state: &Rc<AppState>) 
     ));
     app.add_action(&about_action);
 
-    export_log_button.connect_clicked(clone!(
+    view_log_button.connect_clicked(clone!(
         #[strong] state,
         #[strong] window,
         move |_| {
-            // Flushed synchronously, right here, before the file picker
-            // even opens -- not left to whatever's already pending for
-            // the next timer fire. See flush_disk_log_now's own doc
-            // comment for why: this on-disk file is now the single,
-            // canonical session record (not a separate copy assembled
-            // from an in-memory structure), so exporting it without
-            // this would risk handing over a file missing up to the
-            // last 30 seconds of activity.
-            //
-            // One known, deliberately-accepted gap: disk_log_path can
-            // itself rotate mid-session (see disk_log::should_rotate)
-            // for a session that runs long enough to cross that
-            // threshold -- rare in practice (20MB of log text), but in
-            // that case this exports only the current, most-recent
-            // segment, not earlier, already-rotated-out files from
-            // the same logical session. Not handled here (e.g. by
-            // concatenating every session-log file) since it's enough
-            // of an edge case not to be worth the added complexity
-            // right now.
+            // Only the current segment is opened; earlier rotated files stay on disk.
             flush_disk_log_now(&state);
             let path = state.disk_log_path.borrow().clone();
-
-            let file_dialog = gtk4::FileDialog::builder()
-                .title("Save Log")
-                .initial_name("sync-log.txt")
-                .build();
+            let launcher = gtk4::FileLauncher::new(Some(&gio::File::for_path(&path)));
             glib::MainContext::default().spawn_local(clone!(
                 #[strong] window,
                 async move {
-                    let Ok(dest) = file_dialog.save_future(Some(&window)).await else { return }; // cancelled -- fine
-                    // Read as plain bytes from the real path rather than
-                    // going through gio for the source side -- this is
-                    // always a local file this process itself just
-                    // wrote, never anything remote/virtual, so there's
-                    // nothing gio's own File abstraction would add here.
-                    let contents = match std::fs::read(&path) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            eprintln!("couldn't read on-disk session log for export: {e}");
-                            return;
-                        }
-                    };
-                    if let Err((_, e)) = dest.replace_contents_future(
-                        contents, None, false,
-                        gio::FileCreateFlags::NONE,
-                    ).await {
-                        eprintln!("couldn't save log: {e}");
-                    }
-                }
-            ));
-        }
-    ));
-
-    clear_log_button.connect_clicked(clone!(
-        #[strong] state,
-        #[strong] clear_log_button,
-        move |_| {
-            // Confirmed as a real gap: this button is icon-only, with
-            // its explanation living solely in a tooltip -- which
-            // doesn't exist at all on a touchscreen with no hover.
-            // Someone could tap an unlabeled button and irreversibly
-            // wipe the whole session log with no idea what it even did.
-            // AlertDialog, not a Popover, for the confirmation itself --
-            // a Popover has to fit within the screen space around its
-            // own anchor widget, and that's a real, already-confirmed
-            // source of a different bug this session (the folder
-            // picker's path label growing a Popover past what a small
-            // screen could actually show); AlertDialog is a proper
-            // modal dialog with no such constraint. Clearly labeled
-            // responses ("Cancel"/"Clear Log"), not a bare "Yes"/"No" --
-            // less ambiguous out of context, and matches this app's own
-            // established HIG-following style elsewhere.
-            let dialog = libadwaita::AlertDialog::new(
-                Some("Clear Session Log?"),
-                None,
-            );
-            dialog.add_responses(&[("cancel", "Cancel"), ("clear", "Clear Log")]);
-            dialog.set_response_appearance("clear", libadwaita::ResponseAppearance::Destructive);
-            // Dismissing via Escape or tapping outside counts as Cancel,
-            // not Clear -- the safe, non-destructive default either way
-            // someone backs out without picking a button explicitly.
-            dialog.set_close_response("cancel");
-            dialog.set_default_response(Some("cancel"));
-
-            glib::MainContext::default().spawn_local(clone!(
-                #[strong] state,
-                #[strong] clear_log_button,
-                async move {
-                    let response = dialog.choose_future(Some(&clear_log_button)).await;
-                    if response == "clear" {
-                        state.status_log.borrow_mut().clear();
-                        // update_status_ui no longer touches the log
-                        // TextView's own content at all (see append_
-                        // status_log_line's own doc comment) -- this has
-                        // to explicitly reset it back to the empty-log
-                        // placeholder itself, the one other legitimate
-                        // full-buffer replace in this file besides
-                        // populate_status_log_initial's own, equally
-                        // one-time use at window construction.
-                        if let Some(status_log_label) = state.window_widgets.borrow().as_ref().map(|w| w.status_log_label.clone()) {
-                            status_log_label.buffer().set_text("Nothing logged yet.");
-                        }
-                        update_status_ui(&state, true);
+                    if let Err(e) = launcher.launch_future(Some(&window)).await {
+                        eprintln!("couldn't open session log: {e}");
+                        let _ = launcher.open_containing_folder_future(Some(&window)).await;
                     }
                 }
             ));
@@ -3128,17 +3057,33 @@ fn build_or_present_window(app: &libadwaita::Application, state: &Rc<AppState>) 
         theming_row: theming_row.clone(),
         connections_list,
         status_row,
-        status_log_label,
         active_transfers_row,
         conflicts_row: conflicts_row.clone(),
         conflicts_icon,
-        export_log_button,
-        clear_log_button,
+        view_log_button,
+        log_view,
+        capabilities_row,
+        etag_cap_row,
+        notify_push_cap_row,
+        theming_cap_row,
         sync_now_button,
         pause_button,
         toolbar_view,
         pause_banner,
     });
+
+    // Rebuilds the preview from the ring whenever the log becomes visible
+    // after lines arrived while it was hidden.
+    if let Some(log_view) = state.window_widgets.borrow().as_ref().map(|w| w.log_view.clone()) {
+        log_view.connect_map(clone!(
+            #[strong] state,
+            move |_| {
+                if state.status_log_needs_rebuild.get() {
+                    flush_log_preview(&state);
+                }
+            }
+        ));
+    }
 
     // apply_server_theme's own earlier call (see above, before this
     // window existed at all) ran before window_widgets was populated,
@@ -3237,16 +3182,8 @@ fn build_or_present_window(app: &libadwaita::Application, state: &Rc<AppState>) 
     if let Some(watcher) = state.watcher.borrow().clone() {
         refresh_account_ui(state, &watcher);
     }
-    // Same reasoning, same fix, as the two calls just above -- the log
-    // TextView needs its own, one-time initial population here too,
-    // since build_status_tab itself has no access to state at all (it
-    // takes no parameters) and couldn't have set real content when it
-    // first built the widget. Every update after this point is append_
-    // status_log_line's own, single-line prepend instead -- this is the
-    // only other place a full buffer replace is legitimate.
-    if let Some(status_log_label) = state.window_widgets.borrow().as_ref().map(|w| w.status_log_label.clone()) {
-        populate_status_log_initial(state, &status_log_label);
-    }
+    refresh_capabilities_ui(state);
+    view_log_button_update(state);
 
     window.present();
 }
@@ -3312,7 +3249,7 @@ async fn run_background(state: Rc<AppState>) {
 
     // Status/log event bus: sync.rs (via run_sync_round) sends SyncEvents
     // on state.status_events_tx as it works; this loop is the one place
-    // that folds them into sync_state + status_log and repaints the
+    // that folds them into sync_state and repaints the
     // Status tab. Receiver is taken once here -- see status_events_rx's
     // own doc comment on AppState.
     let status_rx = state.status_events_rx.borrow_mut().take()
@@ -3453,6 +3390,7 @@ async fn run_background(state: Rc<AppState>) {
                         // was simply refreshed by something else in the
                         // meantime.
                         state.push_auth_failed.borrow_mut().insert(account_id.clone(), false);
+                        refresh_capabilities_ui(&state);
                         if !matches!(previous, Some(NotifyPushStatus::Retrying)) {
                             // all_accounts, not watcher.accounts() alone
                             // -- confirmed as a real, reported bug
@@ -3487,6 +3425,7 @@ async fn run_background(state: Rc<AppState>) {
                         // (Disconnected).
                         if !matches!(previous, Some(NotifyPushStatus::Retrying) | Some(NotifyPushStatus::Disconnected)) {
                             state.notify_push_status.borrow_mut().insert(account_id.clone(), NotifyPushStatus::Retrying);
+                            refresh_capabilities_ui(&state);
                             const NOTIFY_PUSH_UNAVAILABLE_DEBOUNCE_SECS: u64 = 60;
                             glib::MainContext::default().spawn_local(clone!(
                                 #[strong] state,
@@ -3503,6 +3442,7 @@ async fn run_background(state: Rc<AppState>) {
                                     let still_retrying = state.notify_push_status.borrow().get(&account_id).copied() == Some(NotifyPushStatus::Retrying);
                                     if still_retrying {
                                         state.notify_push_status.borrow_mut().insert(account_id.clone(), NotifyPushStatus::Disconnected);
+                                        refresh_capabilities_ui(&state);
                                         // all_accounts, not watcher.accounts()
                                         // alone -- see the Connected arm's own
                                         // identical fix, just above, for the
@@ -4028,7 +3968,7 @@ async fn trigger_sync_round(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>, scop
     if currently_metered {
         if !state.paused_for_metered.get() {
             state.paused_for_metered.set(true);
-            log_and_persist(state, format!("[{}] Sync paused -- metered connection detected", now_hms()));
+            log_line(state, format!("[{}] Sync paused -- metered connection detected", now_hms()));
             update_status_ui(state, true);
         }
         if !force {
@@ -4038,7 +3978,7 @@ async fn trigger_sync_round(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>, scop
         }
     } else if state.paused_for_metered.get() {
         state.paused_for_metered.set(false);
-        log_and_persist(state, format!("[{}] Sync resumed -- connection no longer metered", now_hms()));
+        log_line(state, format!("[{}] Sync resumed -- connection no longer metered", now_hms()));
         update_status_ui(state, true);
     }
 
@@ -4058,7 +3998,7 @@ async fn trigger_sync_round(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>, scop
     if currently_power_saving {
         if !state.paused_for_power_save.get() {
             state.paused_for_power_save.set(true);
-            log_and_persist(state, format!("[{}] Sync paused -- Power Save Mode is active", now_hms()));
+            log_line(state, format!("[{}] Sync paused -- Power Save Mode is active", now_hms()));
             update_status_ui(state, true);
         }
         if !force {
@@ -4068,7 +4008,7 @@ async fn trigger_sync_round(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>, scop
         }
     } else if state.paused_for_power_save.get() {
         state.paused_for_power_save.set(false);
-        log_and_persist(state, format!("[{}] Sync resumed -- Power Save Mode is no longer active", now_hms()));
+        log_line(state, format!("[{}] Sync resumed -- Power Save Mode is no longer active", now_hms()));
         update_status_ui(state, true);
     }
 
@@ -4626,7 +4566,7 @@ fn retry_skipped_too_large(state: &Rc<AppState>) {
 }
 
 /// Folds one SyncEvent from sync.rs into sync_state (worst-first) and
-/// status_log, then refreshes the Status tab. Runs on the main loop, so
+/// the disk log, then refreshes the Status tab. Runs on the main loop, so
 /// it's always safe to touch widgets directly here.
 fn apply_status_event(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>, event: status::SyncEvent) {
     let _section = watchdog::section("status event");
@@ -4635,7 +4575,7 @@ fn apply_status_event(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>, event: sta
     // permanent log entries the way every other SyncEvent is (see
     // TransferStarted/TransferEnded's own doc comments in status.rs).
     // Still promotes sync_state via implied_state below, same as any
-    // other event -- just skips the status_log push and the
+    // other event -- just skips the disk log write and the
     // conflict/permission-error bookkeeping that follows, none of which
     // applies to a transfer simply starting or ending.
     match &event {
@@ -4730,29 +4670,13 @@ fn apply_status_event(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>, event: sta
         }
     }
     let formatted = format!("[{}] {}", now_hms(), event.log_line());
-    // ConnectionPath skips (an explicit, user-configured folder
-    // exclusion) still go to the permanent, on-disk session log below,
-    // same as always -- just never to the in-app view. By explicit
-    // request: the user already, deliberately told this app not to
-    // touch that folder, so reminding them of that choice on every
-    // distinct path adds nothing they don't already know, even though
-    // it's still worth having in the on-disk record for later
-    // troubleshooting.
+    // Exclusions caused by a connection's own excluded folders go to the
+    // disk log only.
     let show_in_app = !matches!(&event, status::SyncEvent::Excluded { reason: crate::exclude::ExclusionReason::ConnectionPath, .. });
     if show_in_app {
-        // Captured before the push just below, not after -- this is
-        // specifically "was the log empty before this line," which
-        // append_status_log_line needs to know whether to replace the
-        // still-showing 'Nothing logged yet.' placeholder outright
-        // versus genuinely prepend to real content that's already there.
-        let was_empty = state.status_log.borrow().recent().next().is_none();
-        state.status_log.borrow_mut().push(formatted.clone());
-        append_status_log_line(state, &formatted, was_empty);
-    }
-    state.disk_log_pending.borrow_mut().push(formatted);
-    if !state.disk_log_flush_armed.get() {
-        state.disk_log_flush_armed.set(true);
-        spawn_disk_log_flush_timer(state);
+        log_line(state, formatted);
+    } else {
+        queue_disk_log_line(state, formatted);
     }
     // Only these two events always, unconditionally mean a row just
     // entered the conflict/permission-error state -- everything else
@@ -4770,6 +4694,7 @@ fn apply_status_event(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>, event: sta
     // this expensive rebuild runs, not just a rate limit sitting on top
     // of the same total cost.
     let refresh_issues = matches!(event, status::SyncEvent::Conflict { .. } | status::SyncEvent::PermissionError { .. });
+    let _refresh_section = watchdog::section("status ui refresh");
     update_status_ui(state, refresh_issues);
 }
 
@@ -4800,14 +4725,8 @@ fn spawn_disk_log_flush_timer(state: &Rc<AppState>) {
 /// Writes every line currently sitting in disk_log_pending to
 /// disk_log_path (draining the pending buffer), then rotates to a fresh
 /// file if that write pushed the current one past disk_log::
-/// should_rotate's own threshold. Factored out of
-/// spawn_disk_log_flush_timer specifically so export_log_button's own
-/// handler can call this too, synchronously, right before it hands off
-/// the actual on-disk file -- otherwise an export could hand over a file
-/// missing whatever's accumulated in the last (up to 30-second) window
-/// since the timer's own last fire, which defeats the entire point of
-/// exporting "the session log" as the one, single, genuinely canonical
-/// record rather than a second, separately-assembled copy of it.
+/// should_rotate's own threshold. Also called by the View Log handler so
+/// the opened file includes lines still waiting for the flush timer.
 fn flush_disk_log_now(state: &Rc<AppState>) {
     let _section = watchdog::section("disk log flush");
     let lines: Vec<String> = state.disk_log_pending.borrow_mut().drain(..).collect();
@@ -5103,28 +5022,91 @@ fn now_hms() -> String {
         .unwrap_or_default()
 }
 
-/// Pushes `line` to both the in-app StatusLog (for the visible Status
-/// tab) *and* the on-disk session log (for Export Log and general
-/// persistence) -- see disk_log.rs's own module doc comment for why
-/// those are two genuinely separate things, not one piece of state with
-/// two views onto it. This is the ONLY correct way to log a line that
-/// should survive an export: a bare `state.status_log.borrow_mut().push(...)`
-/// only ever updates the in-app view.
-///
-/// Confirmed as a real, reported bug without this: `line` isn't the
-/// only thing that already needed this -- every pause/resume message in
-/// this file (metered, low battery, manual pause) was already calling
-/// the bare, display-only push directly, meaning none of them were ever
-/// actually exportable, only visible in the running app's own Status
-/// tab. This function exists specifically so that mistake has nowhere
-/// left to be made again -- every call site below has been switched to
-/// use it instead of the bare push.
-fn log_and_persist(state: &Rc<AppState>, line: String) {
-    state.status_log.borrow_mut().push(line.clone());
+/// Queues `line` for the on-disk session log and arms the flush timer. The
+/// first call also enables the View Full Log button.
+fn queue_disk_log_line(state: &Rc<AppState>, line: String) {
     state.disk_log_pending.borrow_mut().push(line);
     if !state.disk_log_flush_armed.get() {
         state.disk_log_flush_armed.set(true);
         spawn_disk_log_flush_timer(state);
+    }
+    if !state.log_has_entries.replace(true) {
+        view_log_button_update(state);
+    }
+}
+
+/// Writes `line` to the disk log and to the Session tab's log preview.
+fn log_line(state: &Rc<AppState>, line: String) {
+    push_log_preview(state, &line);
+    queue_disk_log_line(state, line);
+}
+
+fn view_log_button_update(state: &Rc<AppState>) {
+    if let Some(button) = state.window_widgets.borrow().as_ref().map(|w| w.view_log_button.clone()) {
+        button.set_sensitive(state.log_has_entries.get());
+    }
+}
+
+/// Adds `line` to the preview ring and schedules one batched widget update.
+fn push_log_preview(state: &Rc<AppState>, line: &str) {
+    {
+        let mut ring = state.status_log_ring.borrow_mut();
+        ring.push_back(line.to_string());
+        if ring.len() > LOG_PREVIEW_LINES {
+            ring.pop_front();
+        }
+    }
+    state.status_log_pending.borrow_mut().push(line.to_string());
+    if !state.status_log_flush_armed.replace(true) {
+        glib::timeout_add_local_once(
+            std::time::Duration::from_millis(LOG_PREVIEW_FLUSH_MS),
+            clone!(
+                #[strong] state,
+                move || {
+                    state.status_log_flush_armed.set(false);
+                    flush_log_preview(&state);
+                }
+            ),
+        );
+    }
+}
+
+/// Applies pending lines to the preview widget. An unmapped widget is not
+/// touched; it is rebuilt from the ring when it is next shown.
+fn flush_log_preview(state: &Rc<AppState>) {
+    let Some(view) = state.window_widgets.borrow().as_ref().map(|w| w.log_view.clone()) else {
+        state.status_log_pending.borrow_mut().clear();
+        state.status_log_needs_rebuild.set(true);
+        return;
+    };
+    if !view.is_mapped() {
+        state.status_log_pending.borrow_mut().clear();
+        state.status_log_needs_rebuild.set(true);
+        return;
+    }
+    let _section = watchdog::section("status log insert");
+    if state.status_log_needs_rebuild.replace(false) {
+        state.status_log_pending.borrow_mut().clear();
+        let text = state.status_log_ring.borrow().iter().cloned().collect::<Vec<_>>().join("\n");
+        view.buffer().set_text(&text);
+        return;
+    }
+    let pending: Vec<String> = state.status_log_pending.borrow_mut().drain(..).collect();
+    if pending.is_empty() {
+        return;
+    }
+    let buffer = view.buffer();
+    let mut text = pending.join("\n");
+    if buffer.char_count() > 0 {
+        text.insert(0, '\n');
+    }
+    buffer.insert(&mut buffer.end_iter(), &text);
+    let excess = buffer.line_count() - LOG_PREVIEW_LINES as i32;
+    if excess > 0 {
+        let _trim_section = watchdog::section("status log trim");
+        let mut start = buffer.start_iter();
+        let mut end = buffer.iter_at_line(excess).unwrap_or_else(|| buffer.end_iter());
+        buffer.delete(&mut start, &mut end);
     }
 }
 
@@ -5320,10 +5302,9 @@ fn active_watch_targets(state: &AppState) -> Vec<(String, PathBuf, Vec<String>)>
 }
 
 /// Refreshes the Status tab's row (worst-first title + last-checked
-/// subtitle) and the always-visible Log section below it. Called both
-/// after every sync round and every time a SyncEvent arrives mid-round,
-/// so the UI never lags behind sync_state/status_log by more than one
-/// event.
+/// subtitle). Called both after every sync round and every time a
+/// SyncEvent arrives mid-round, so the UI never lags behind sync_state
+/// by more than one event.
 
 /// `refresh_issues`: whether to also run refresh_conflicts_ui this call --
 /// true for essentially every caller (a button click, a settings change,
@@ -5351,91 +5332,6 @@ fn format_with_thousands(n: u64) -> String {
         result.push(c);
     }
     result.chars().rev().collect()
-}
-
-/// Appends exactly one new, already-formatted line to the log
-/// TextView's own buffer directly, in place -- called from apply_
-/// status_event, right where that same line gets pushed to state.
-/// status_log itself, never from update_status_ui or any other,
-/// broader refresh. That placement is what makes this genuinely
-/// append-only rather than needing its own "did anything actually
-/// change" check: this function only ever runs when a real, new line
-/// exists, since that's the only time its own caller runs at all.
-///
-/// Prepended at the start of the buffer, not appended at the end --
-/// matches StatusLog::recent's own newest-first ordering, which this
-/// app's log display has always used; switching to newest-last just to
-/// make "append" literal would be a real, visible behavior change
-/// nobody asked for. GtkTextBuffer's own insert() is efficient at any
-/// position, not just the end (see its own B-tree-backed implementation
-/// -- gtk4's real docs confirm line_count() alone is cached specifically
-/// because it's expected to be called often), so prepending here costs
-/// nothing extra over appending would have.
-///
-/// was_empty is decided by the caller, before its own push() -- this
-/// function has no way to tell "the buffer already holds one real line"
-/// from "the buffer still holds the never-cleared 'Nothing logged yet.'
-/// placeholder" apart from being told directly, and guessing from the
-/// buffer's own text content would mean comparing against that exact
-/// placeholder string, which is fragile in a way an explicit bool isn't.
-fn append_status_log_line(state: &Rc<AppState>, formatted: &str, was_empty: bool) {
-    let Some(status_log_label) = state.window_widgets.borrow().as_ref().map(|w| w.status_log_label.clone()) else {
-        return; // no window open right now -- nothing to append to
-    };
-    let buffer = status_log_label.buffer();
-    if was_empty {
-        // Replaces the "Nothing logged yet." placeholder outright --
-        // the one and only case elsewhere in this function that's a
-        // full replace rather than a true prepend, since there's
-        // nothing meaningful to prepend *to* yet.
-        buffer.set_text(formatted);
-        return;
-    }
-    let mut start = buffer.start_iter();
-    // Trailing \n, not leading -- this inserts before whatever was
-    // already the first line, so the separator has to land between
-    // this new line and that old first line, not before this new line
-    // itself (which would just be a blank first line in the display).
-    buffer.insert(&mut start, &format!("{formatted}\n"));
-
-    let max_lines = status::STATUS_LOG_CAPACITY as i32;
-    if buffer.line_count() > max_lines {
-        // Oldest line(s) trimmed from the *end* of the buffer, not the
-        // start -- the reverse of where a normal append-only log would
-        // trim from, because of the same newest-first ordering this
-        // whole function preserves: with the newest content at the
-        // start, the oldest is always what's sitting at the end. At
-        // most one line over on any single call (this function only
-        // ever adds one line at a time), so in practice this only ever
-        // deletes the single, exact line that just pushed the count
-        // over -- but the loop handles more regardless, rather than
-        // assuming that invariant silently holds forever.
-        while buffer.line_count() > max_lines {
-            let mut trim_start = buffer.iter_at_line(max_lines).unwrap_or_else(|| buffer.end_iter());
-            let mut end = buffer.end_iter();
-            buffer.delete(&mut trim_start, &mut end);
-        }
-    }
-}
-
-/// Sets the log TextView's own initial content once, right after the
-/// window itself is first built -- build_status_tab has no access to
-/// state at all (it takes no parameters), so this is the earliest point
-/// state.status_log's own, possibly-already-nonempty contents (sync
-/// activity can genuinely happen before a window is ever opened, on a
-/// hidden/background launch) can actually be reflected. The one
-/// legitimate full-buffer replace in this whole file outside Clear
-/// Log's own handler -- every other update after this point is
-/// append_status_log_line's own, single-line prepend instead.
-fn populate_status_log_initial(state: &Rc<AppState>, status_log_label: &gtk4::TextView) {
-    let log = state.status_log.borrow();
-    let mut lines = log.recent().peekable();
-    if lines.peek().is_none() {
-        status_log_label.buffer().set_text("Nothing logged yet.");
-    } else {
-        let text = lines.cloned().collect::<Vec<_>>().join("\n");
-        status_log_label.buffer().set_text(&text);
-    }
 }
 
 fn update_status_ui(state: &Rc<AppState>, refresh_issues: bool) {
@@ -5475,10 +5371,10 @@ fn update_status_ui(state: &Rc<AppState>, refresh_issues: bool) {
     }
 
     let Some(widgets) = state.window_widgets.borrow().as_ref()
-        .map(|w| (w.status_row.clone(), w.active_transfers_row.clone(), w.conflicts_row.clone(), w.conflicts_icon.clone(), w.export_log_button.clone(), w.clear_log_button.clone(), w.sync_now_button.clone(), w.pause_button.clone(), w.pause_banner.clone())) else {
+        .map(|w| (w.status_row.clone(), w.active_transfers_row.clone(), w.conflicts_row.clone(), w.conflicts_icon.clone(), w.sync_now_button.clone(), w.pause_button.clone(), w.pause_banner.clone())) else {
         return; // no window open right now -- nothing further to refresh
     };
-    let (status_row, active_transfers_row, conflicts_row, conflicts_icon, export_log_button, clear_log_button, sync_now_button, pause_button, pause_banner) = widgets;
+    let (status_row, active_transfers_row, conflicts_row, conflicts_icon, sync_now_button, pause_button, pause_banner) = widgets;
 
     if state.config.borrow().active_account_id.is_none() {
         status_row.set_title("No account selected");
@@ -5593,19 +5489,6 @@ fn update_status_ui(state: &Rc<AppState>, refresh_issues: bool) {
     let is_idle = state.sync_state.get() == status::SyncState::Idle;
     sync_now_button.set_sensitive(account_and_connections_ready && not_manually_paused && is_idle);
 
-    // TextView content itself is no longer touched here at all --
-    // append_status_log_line (called from apply_status_event, right
-    // where a new line is genuinely pushed) is the only thing that ever
-    // updates it now, a real, single-line prepend rather than this
-    // function's own former full-buffer rebuild-and-replace on every
-    // call regardless of cause. Button sensitivity alone stays here --
-    // cheap (an empty-check on an in-memory VecDeque), and this is
-    // still the right, general-purpose place for it, unlike the log
-    // content itself.
-    let log_is_empty = state.status_log.borrow().recent().next().is_none();
-    export_log_button.set_sensitive(!log_is_empty);
-    clear_log_button.set_sensitive(!log_is_empty);
-
     // Unconditional, unlike refresh_conflicts_ui just below -- this is
     // cheap (reading an in-memory map), not a real journal query, so it
     // doesn't need the same refresh_issues gate that exists specifically
@@ -5619,10 +5502,9 @@ fn update_status_ui(state: &Rc<AppState>, refresh_issues: bool) {
 
 /// Refreshes state.pending_issues from the journal's sync_items rows
 /// flagged status=Conflict or permission_error, scoped to the
-/// currently-active account, and updates the Sync Issues row to match --
-/// hidden entirely at zero (no persistent "None detected" reminder that
-/// something's imperfect when nothing actually is), "N need attention"
-/// otherwise. The full detail (local/remote info for a conflict,
+/// currently-active account, and updates the Sync Issues row to match:
+/// "None" with a dimmed, inactive row at zero, "N need attention" with a
+/// warning icon and an activatable row otherwise. The full detail (local/remote info for a conflict,
 /// Retry/Dismiss for a permission error) lives in
 /// show_sync_issues_dialog, opened by activating this row.
 fn refresh_conflicts_ui(state: &Rc<AppState>, conflicts_row: &libadwaita::ActionRow, conflicts_icon: &gtk4::Image) {
@@ -5634,9 +5516,7 @@ fn refresh_conflicts_ui(state: &Rc<AppState>, conflicts_row: &libadwaita::Action
     let Some(active_id) = config.active_account_id.clone() else {
         *state.pending_issues.borrow_mut() = Vec::new();
         conflicts_row.set_subtitle("None");
-        // Dimmed, not full opacity -- nothing to resolve with no account
-        // selected, same as the zero-issues case below.
-        conflicts_icon.set_opacity(0.3);
+        set_conflicts_row_state(conflicts_row, conflicts_icon, false);
         return;
     };
 
@@ -5659,15 +5539,20 @@ fn refresh_conflicts_ui(state: &Rc<AppState>, conflicts_row: &libadwaita::Action
 
     if count > 0 {
         conflicts_row.set_subtitle(&format!("{count} need attention"));
-        conflicts_icon.set_opacity(1.0);
+        set_conflicts_row_state(conflicts_row, conflicts_icon, true);
     } else {
         conflicts_row.set_subtitle("None");
-        // Dimmed, not full opacity -- the row itself now stays visible
-        // at zero (see AppState's own doc comment on pending_issues, and
-        // the earlier decision to keep this row shown rather than
-        // hiding it entirely), so the icon needs its own way to show
-        // "nothing to resolve right now" instead of looking identical
-        // to the "issues need attention" state.
+        set_conflicts_row_state(conflicts_row, conflicts_icon, false);
+    }
+}
+
+fn set_conflicts_row_state(conflicts_row: &libadwaita::ActionRow, conflicts_icon: &gtk4::Image, has_issues: bool) {
+    conflicts_row.set_activatable(has_issues);
+    if has_issues {
+        conflicts_icon.set_icon_name(Some("dialog-warning-symbolic"));
+        conflicts_icon.set_opacity(1.0);
+    } else {
+        conflicts_icon.set_icon_name(Some("emblem-ok-symbolic"));
         conflicts_icon.set_opacity(0.3);
     }
 }
@@ -7044,13 +6929,13 @@ async fn disconnect_active_account(state: &Rc<AppState>, watcher: &Rc<GoaWatcher
 
 fn refresh_account_ui(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>) {
     let Some(widgets) = state.window_widgets.borrow().as_ref()
-        .map(|w| (w.window.clone(), w.account_section.clone(), w.connections_list.clone(), w.theming_row.clone())) else {
+        .map(|w| (w.window.clone(), w.account_section.clone(), w.connections_list.clone(), w.capabilities_row.clone())) else {
         if is_debug_enabled() {
             eprintln!("[{}] [debug] refresh_account_ui: no window open, nothing to refresh", now_hms());
         }
         return; // no window open right now -- nothing to refresh
     };
-    let (window, account_section, connections_list, theming_row) = widgets;
+    let (window, account_section, connections_list, capabilities_row) = widgets;
 
     while let Some(row) = account_section.row_at_index(0) {
         account_section.remove(&row);
@@ -7090,17 +6975,8 @@ fn refresh_account_ui(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>) {
     // happens to touch account state needing its own explicit
     // apply_server_theme call to stay in sync.
     apply_server_theme(state);
-    // Same reasoning, same fix, for the Settings toggle's own enabled
-    // state -- it had the identical staleness problem, checked once at
-    // Settings-page build time using whatever was known at that moment.
-    // cached_server_themes' own entry for the active account, not
-    // etag_capable -- see this same toggle's own construction-time doc
-    // comment for why that flag answers a different question (ETag-tier
-    // eligibility) than "does this account's server actually have real
-    // theme data."
-    theming_row.set_sensitive(
-        active_account_id.as_deref().is_some_and(|id| state.config.borrow().cached_server_themes.contains_key(id))
-    );
+    update_theming_row_sensitivity(state);
+    refresh_capabilities_ui(state);
 
     match &active_account {
         Some(account) => {
@@ -7188,6 +7064,7 @@ fn refresh_account_ui(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>) {
             ));
             action_row_add_suffix(&row, &disconnect_button);
             account_section.append(&row);
+            account_section.append(&capabilities_row);
 
             if !account.is_ready() {
                 // Nothing else to show -- an account this app can't
@@ -7404,6 +7281,7 @@ fn refresh_account_ui(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>) {
                 move |_| show_account_dialog(state.clone(), watcher.clone(), window.clone())
             ));
             account_section.append(&add_account_row);
+            account_section.append(&capabilities_row);
         }
     }
 
@@ -7715,7 +7593,7 @@ fn show_account_dialog(state: Rc<AppState>, watcher: Rc<GoaWatcher>, parent_wind
                             // account isn't an explicit "do this anyway"
                             // override the way Sync Now is.
                             if let Some(account) = all_accounts(&state, &watcher).into_iter().find(|a| a.account_id() == account_id) {
-                                check_account_capabilities(&state, &watcher, &account, false).await;
+                                ensure_capabilities_and_theme(&state, &watcher, &account, false).await;
                             }
                             // Checked (and, if needed, paused) here,
                             // AFTER the capabilities check just above but
@@ -7917,7 +7795,7 @@ fn show_account_dialog(state: Rc<AppState>, watcher: Rc<GoaWatcher>, parent_wind
                         // account-selection row's own identical
                         // argument. Just having logged in isn't an
                         // explicit "do this anyway" override either.
-                        check_account_capabilities(&state, &watcher, &account, false).await;
+                        ensure_capabilities_and_theme(&state, &watcher, &account, false).await;
                     }
                     // Checked (and, if needed, paused) here, AFTER the
                     // capabilities check just above but BEFORE spawn_
@@ -8059,6 +7937,9 @@ fn show_folder_dialog(state: Rc<AppState>, watcher: Rc<GoaWatcher>, account: Acc
     page1_fields.append(&gtk4::Label::builder().label("Local folder").xalign(0.0).css_classes(["heading"]).build());
     page1_fields.append(&choose_local_button);
     page1_fields.append(&local_path_label);
+    if let Some(hint) = sandbox::filesystem_hint() {
+        page1_fields.append(&gtk4::Label::builder().label(hint).css_classes(["dim-label", "caption"]).wrap(true).xalign(0.0).selectable(true).build());
+    }
     page1_fields.append(&gtk4::Label::builder().label("Remote folder").xalign(0.0).css_classes(["heading"]).build());
     page1_fields.append(&choose_remote_button);
     page1_fields.append(&remote_path_label);
@@ -8716,7 +8597,7 @@ fn pause_for_restored_connections_if_needed(state: &Rc<AppState>, account_id: &s
     }
     state.paused_by_user.set(true);
     state.paused_reason_restored_account.set(true);
-    log_and_persist(state, format!("[{}] Paused newly restored account", now_hms()));
+    log_line(state, format!("[{}] Paused newly restored account", now_hms()));
     // Same reasoning as toggle_pause's own identical call -- a round
     // already mid-flight (for whichever account was active before this
     // one) shouldn't keep running to completion just because this
@@ -8756,185 +8637,198 @@ fn clear_restored_account_pause_if_stale(state: &Rc<AppState>) {
     if state.paused_reason_restored_account.get() {
         state.paused_by_user.set(false);
         state.paused_reason_restored_account.set(false);
-        log_and_persist(state, format!("[{}] Sync resumed -- the restored account this was paused for is no longer active", now_hms()));
+        log_line(state, format!("[{}] Sync resumed -- the restored account this was paused for is no longer active", now_hms()));
         update_status_ui(state, true);
     }
 }
 
-/// Checks a single account's own ETag/notify_push/theming capabilities
-/// against its server, throttled to once per account per session for
-/// the ETag/notify_push parts (a server's support for either doesn't
-/// change mid-session) with the theme specifically re-fetched every
-/// call after the first (an admin's actual theme configuration
-/// genuinely can change at any time, and there's no push-based way to
-/// learn about that -- confirmed via direct research that theming
-/// changes aren't among the event categories notify_push ever
-/// advertises or emits: this server's own capabilities response lists
-/// exactly "files", "activities", "notifications" and nothing else).
+/// Result of check_account_capabilities.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CapabilityOutcome {
+    /// A definitive answer existed before this call. The theme was not fetched.
+    AlreadyKnown,
+    /// This call obtained the definitive answer and applied the fetched theme.
+    JustDiscovered,
+    /// No definitive answer: paused, credentials unavailable, request in
+    /// flight, or the server was unreachable.
+    Unknown,
+}
+
+/// Obtains an account's ETag, notify_push and theming capabilities once per
+/// session. Only a definitive answer marks the account as checked, so
+/// every call retries after an indeterminate one. Callable before an
+/// account has any connections.
 ///
-/// Deliberately account-level, not tied to iterating this account's own
-/// connections -- by request, extracted out of run_sync_round's own
-/// per-connection loop (which still calls this, once per connection,
-/// same as before) specifically so it can ALSO be called directly the
-/// moment an account becomes active, before it necessarily has any
-/// connections configured at all. Confirmed as a real, reported gap
-/// without that: capabilities_checked (and therefore ETag capability,
-/// notify_push, AND theming, all three -- not theme alone, since none
-/// of the three have any real reason to wait on a connection existing
-/// either) previously only ever got checked as a side effect of a sync
-/// round actually reaching this account's own connections -- an
-/// account with zero connections yet (a fresh install right after
-/// adding one, or a freshly-added direct account switched to from a
-/// different, previously-active one) would never trigger this at all,
-/// no matter how many sync rounds ran, since the per-connection loop
-/// this used to live inside would never execute even once.
-///
-/// Safe to call from multiple places at once (this function's own new
-/// call sites, and run_sync_round's own per-connection loop, could
-/// plausibly reach the same account around the same moment) for the
-/// same reason the single, original call site already was:
-/// capabilities_checked itself is marked synchronously, before this
-/// function's own first await point -- since glib's main context is
-/// single-threaded, nothing else can interleave and see "not yet
-/// checked" in between, so at most one full discovery (and therefore at
-/// most one notify_push listener spawn) can ever be in flight for a
-/// given account at a time, regardless of how many call sites might
-/// invoke this around the same moment.
-async fn check_account_capabilities(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>, account: &AccountSource, force: bool) {
-    // Same three flags, same force-bypass, as trigger_sync_round's own
-    // identical check -- by request, confirmed as a real, genuinely
-    // introduced gap without this: this function makes a real network
-    // request (push::discover_capabilities), and its two new, direct
-    // call sites (account selection, a freshly-added account) bypass
-    // trigger_sync_round entirely, so neither one inherited its pause
-    // gate the way this function's original, single call site (from
-    // within run_sync_round, itself only ever reached after trigger_
-    // sync_round's own gate already passed) always implicitly did.
-    // Threaded through from both of those new call sites (force: false,
-    // since neither is an explicit "Sync Now"-style override) and from
-    // run_sync_round's own call (force: whatever trigger_sync_round
-    // itself was given) -- not a fresh check against the pause flags
-    // alone, since those flags themselves stay true even when force
-    // already decided to bypass them (see trigger_sync_round's own
-    // paused_for_metered handling for why), which would otherwise
-    // silently break capabilities discovery during a legitimate "Sync
-    // Now while paused."
+/// The in-flight set is updated before the first await point, so at most
+/// one discovery per account runs at a time and the notify_push listener
+/// spawns at most once.
+async fn check_account_capabilities(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>, account: &AccountSource, force: bool) -> CapabilityOutcome {
+    // Direct callers bypass trigger_sync_round, so the pause flags are
+    // checked here. `force` mirrors Sync Now, which overrides them.
     if !force && (state.paused_by_user.get() || state.paused_for_metered.get() || state.paused_for_power_save.get()) {
-        return;
+        return CapabilityOutcome::Unknown;
     }
     let account_id = account.account_id().to_string();
-    if !state.capabilities_checked.borrow().contains(&account_id) {
-        // credentials() folds "password retrieval failed" and "GOA
-        // account not ready"/"direct account credential fetch failed"
-        // into the same single None case -- preserves the original's
-        // own deliberate behavior exactly: if this fails for any
-        // reason, capabilities_checked is left unmarked below, so it's
-        // simply retried next time this is called rather than treated
-        // as a real, terminal failure.
-        if let Some((_, username, password)) = account.credentials(watcher).await {
-            state.capabilities_checked.borrow_mut().insert(account_id.clone());
-            let server_url = account.server_url().expect("checked Some above");
-            let password_str = password.as_str().to_string();
-            // Cloned here, before username is moved into the
-            // run_blocking closure below -- needed again further down
-            // for the push listener thread.
-            let username_for_listener = username.clone();
-            let capabilities = push::run_blocking(move || push::discover_capabilities(&server_url, &username, &password_str)).await;
-            if is_debug_enabled() {
-                eprintln!(
-                    "[{}] [debug] capabilities check ({}): is_nextcloud_or_owncloud={} theme={:?}",
-                    now_hms(), account.presentation_identity(), capabilities.is_nextcloud_or_owncloud, capabilities.theme,
-                );
-            }
-
-            state.etag_capable.borrow_mut().insert(account_id.clone(), capabilities.is_nextcloud_or_owncloud);
-            let _ = state.status_events_tx.try_send(status::SyncEvent::EtagCapability {
-                connection: account.presentation_identity(),
-                available: capabilities.is_nextcloud_or_owncloud,
-            });
-
-            // Cached regardless of apply_server_theming's own current
-            // value -- toggling the setting back on later should be
-            // able to use whatever was last actually fetched, not need
-            // a fresh network round-trip just because it was off at the
-            // moment this particular check happened to run.
-            if let Some(theme) = &capabilities.theme {
-                state.config.borrow_mut().cached_server_themes.insert(account_id.clone(), theme.clone());
-                save_config(state);
-            }
-            apply_server_theme(state);
-            // Direct set_sensitive here rather than calling
-            // refresh_account_ui again -- this can run mid-sync-round,
-            // not a place that should also be rebuilding the account
-            // list UI as a side effect. capabilities.theme.is_some(),
-            // not is_nextcloud_or_owncloud -- see this toggle's own
-            // construction-time doc comment for why that flag alone
-            // isn't the right signal (true for ownCloud too, which has
-            // no real theming data at all).
-            if let Some(theming_row) = state.window_widgets.borrow().as_ref().map(|w| w.theming_row.clone()) {
-                let is_active_account = state.config.borrow().active_account_id.as_deref() == Some(account_id.as_str());
-                theming_row.set_sensitive(is_active_account && capabilities.theme.is_some());
-            }
-
-            match (capabilities.websocket_url, capabilities.pre_auth_url) {
-                (Some(websocket_url), Some(pre_auth_url)) => {
-                    let senders = (
-                        state.push_password_requests_tx.borrow().clone(),
-                        state.push_events_tx.borrow().clone(),
-                    );
-                    if let (Some(password_requests_tx), Some(push_events_tx)) = senders {
-                        let account_id = account_id.clone();
-                        std::thread::spawn(move || {
-                            push::run_listener(websocket_url, pre_auth_url, account_id, username_for_listener, password_requests_tx, push_events_tx);
-                        });
-                    }
-                    // Connected/Disconnected -- and their own
-                    // NotifyPushCapability logging -- come from the
-                    // listener thread itself once it actually
-                    // establishes (or fails to establish) a connection;
-                    // see the push-event handler task in run_background.
-                }
-                _ => {
-                    // notify_push genuinely isn't installed on this
-                    // server -- known for certain, right now, so logged
-                    // right here rather than left to a listener that
-                    // will never even be spawned to report it.
-                    let _ = state.status_events_tx.try_send(status::SyncEvent::NotifyPushCapability {
-                        connection: account.presentation_identity(),
-                        available: false,
-                    });
-                }
-            }
-        }
-        // If password retrieval itself failed, capabilities_checked is
-        // deliberately left unmarked -- this account's own discovery is
-        // simply retried next time this is called, rather than being
-        // permanently stuck reporting "nothing available" because of
-        // what was actually just a transient credential-retrieval
-        // problem, not a real answer about the server's own
-        // capabilities.
-    } else if let Some((_, username, password)) = account.credentials(watcher).await {
-        // Re-fetches just for a fresh theme, every call after the first
-        // -- by request, piggybacked on this same already-throttled
-        // touchpoint rather than adding a separate, dedicated throttle
-        // of its own on top of it. ETag-capability detection above
-        // doesn't need repeating (a server's support for ETags doesn't
-        // change mid-session), but the admin's actual theme
-        // configuration genuinely can change at any time -- and there's
-        // no push-based way to learn about that (see this function's
-        // own doc comment above for the confirmed research on that).
-        let server_url = account.server_url().expect("checked Some above");
-        let password_str = password.as_str().to_string();
-        let capabilities = push::run_blocking(move || push::discover_capabilities(&server_url, &username, &password_str)).await;
-        if is_debug_enabled() {
-            eprintln!("[{}] [debug] theme re-fetch ({}): server returned theme={:?}", now_hms(), account.presentation_identity(), capabilities.theme);
-        }
-        if let Some(theme) = capabilities.theme {
-            state.config.borrow_mut().cached_server_themes.insert(account_id.clone(), theme);
-            save_config(state);
-        }
-        apply_server_theme(state);
+    if state.capabilities_checked.borrow().contains(&account_id) {
+        return CapabilityOutcome::AlreadyKnown;
     }
+    if !state.capabilities_in_flight.borrow_mut().insert(account_id.clone()) {
+        return CapabilityOutcome::Unknown;
+    }
+    let outcome = discover_account_capabilities(state, watcher, account, &account_id).await;
+    state.capabilities_in_flight.borrow_mut().remove(&account_id);
+    refresh_capabilities_ui(state);
+    outcome
+}
+
+async fn discover_account_capabilities(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>, account: &AccountSource, account_id: &str) -> CapabilityOutcome {
+    let Some((_, username, password)) = account.credentials(watcher).await else {
+        return CapabilityOutcome::Unknown;
+    };
+    let server_url = account.server_url().expect("checked Some above");
+    let password_str = password.as_str().to_string();
+    let username_for_listener = username.clone();
+    let Some(capabilities) = push::run_blocking(move || push::discover_capabilities(&server_url, &username, &password_str)).await else {
+        if is_debug_enabled() {
+            eprintln!("[{}] [debug] capabilities check ({}): indeterminate, will retry", now_hms(), account.presentation_identity());
+        }
+        return CapabilityOutcome::Unknown;
+    };
+    if is_debug_enabled() {
+        eprintln!(
+            "[{}] [debug] capabilities check ({}): is_nextcloud_or_owncloud={} theme={:?}",
+            now_hms(), account.presentation_identity(), capabilities.is_nextcloud_or_owncloud, capabilities.theme,
+        );
+    }
+
+    state.capabilities_checked.borrow_mut().insert(account_id.to_string());
+    state.etag_capable.borrow_mut().insert(account_id.to_string(), capabilities.is_nextcloud_or_owncloud);
+    state.theming_available.borrow_mut().insert(account_id.to_string(), capabilities.theme.is_some());
+    let push_installed = capabilities.websocket_url.is_some() && capabilities.pre_auth_url.is_some();
+    state.notify_push_installed.borrow_mut().insert(account_id.to_string(), push_installed);
+    let _ = state.status_events_tx.try_send(status::SyncEvent::EtagCapability {
+        connection: account.presentation_identity(),
+        available: capabilities.is_nextcloud_or_owncloud,
+    });
+
+    store_and_apply_theme(state, account_id, capabilities.theme);
+
+    match (capabilities.websocket_url, capabilities.pre_auth_url) {
+        (Some(websocket_url), Some(pre_auth_url)) => {
+            let senders = (
+                state.push_password_requests_tx.borrow().clone(),
+                state.push_events_tx.borrow().clone(),
+            );
+            if let (Some(password_requests_tx), Some(push_events_tx)) = senders {
+                let account_id = account_id.to_string();
+                std::thread::spawn(move || {
+                    push::run_listener(websocket_url, pre_auth_url, account_id, username_for_listener, password_requests_tx, push_events_tx);
+                });
+            }
+            // Connected and Disconnected are reported by the listener
+            // thread; see the push-event handler in run_background.
+        }
+        _ => {
+            let _ = state.status_events_tx.try_send(status::SyncEvent::NotifyPushCapability {
+                connection: account.presentation_identity(),
+                available: false,
+            });
+        }
+    }
+    CapabilityOutcome::JustDiscovered
+}
+
+/// Caches `theme` and applies it, but only when it differs from the cached
+/// value. The cache is kept even while apply_server_theming is off.
+fn store_and_apply_theme(state: &Rc<AppState>, account_id: &str, theme: Option<config::ServerTheme>) {
+    if let Some(theme) = theme {
+        let changed = state.config.borrow().cached_server_themes.get(account_id) != Some(&theme);
+        if changed {
+            state.config.borrow_mut().cached_server_themes.insert(account_id.to_string(), theme);
+            save_config(state);
+            apply_server_theme(state);
+        }
+    }
+    update_theming_row_sensitivity(state);
+}
+
+/// Direct set_sensitive instead of refresh_account_ui, which would rebuild
+/// the account list from inside a sync round.
+fn update_theming_row_sensitivity(state: &Rc<AppState>) {
+    let Some(theming_row) = state.window_widgets.borrow().as_ref().map(|w| w.theming_row.clone()) else { return };
+    let config = state.config.borrow();
+    let sensitive = config.active_account_id.as_deref().is_some_and(|id| {
+        state.theming_available.borrow().get(id).copied().unwrap_or_else(|| config.cached_server_themes.contains_key(id))
+    });
+    theming_row.set_sensitive(sensitive);
+}
+
+/// Re-fetches the account's theme. Skipped for accounts whose definitive
+/// check found no OCS endpoint, since a plain WebDAV server has no theme.
+async fn refresh_account_theme(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>, account: &AccountSource) {
+    let account_id = account.account_id().to_string();
+    if state.etag_capable.borrow().get(&account_id).copied() != Some(true) {
+        return;
+    }
+    let Some((_, username, password)) = account.credentials(watcher).await else { return };
+    let server_url = account.server_url().expect("checked Some above");
+    let password_str = password.as_str().to_string();
+    let Some(capabilities) = push::run_blocking(move || push::discover_capabilities(&server_url, &username, &password_str)).await else {
+        return;
+    };
+    if is_debug_enabled() {
+        eprintln!("[{}] [debug] theme re-fetch ({}): server returned theme={:?}", now_hms(), account.presentation_identity(), capabilities.theme);
+    }
+    state.theming_available.borrow_mut().insert(account_id.clone(), capabilities.theme.is_some());
+    store_and_apply_theme(state, &account_id, capabilities.theme);
+    refresh_capabilities_ui(state);
+}
+
+/// Ensures capabilities for call sites outside run_sync_round, fetching the
+/// theme afterwards only when the answer was already known.
+async fn ensure_capabilities_and_theme(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>, account: &AccountSource, force: bool) {
+    if check_account_capabilities(state, watcher, account, force).await == CapabilityOutcome::AlreadyKnown {
+        refresh_account_theme(state, watcher, account).await;
+    }
+}
+
+fn capability_state(checked: bool, value: Option<bool>) -> CapabilityState {
+    match (checked, value) {
+        (false, _) => CapabilityState::Checking,
+        (true, Some(true)) => CapabilityState::Available,
+        (true, _) => CapabilityState::Unavailable,
+    }
+}
+
+/// Updates the Capabilities rows from current state.
+fn refresh_capabilities_ui(state: &Rc<AppState>) {
+    let widgets = state.window_widgets.borrow();
+    let Some(w) = widgets.as_ref() else { return };
+    let active = state.config.borrow().active_account_id.clone();
+    let labels = match active {
+        None => [CapabilityState::Unavailable; 3],
+        Some(id) => {
+            let checked = state.capabilities_checked.borrow().contains(&id);
+            let etag = capability_state(checked, state.etag_capable.borrow().get(&id).copied());
+            let theming = capability_state(checked, state.theming_available.borrow().get(&id).copied());
+            let push_installed = state.notify_push_installed.borrow().get(&id).copied().unwrap_or(false);
+            let notify_push = if !checked {
+                CapabilityState::Checking
+            } else if !push_installed || state.push_auth_failed.borrow().get(&id).copied().unwrap_or(false) {
+                CapabilityState::Unavailable
+            } else {
+                match state.notify_push_status.borrow().get(&id).copied() {
+                    Some(NotifyPushStatus::Connected) => CapabilityState::Available,
+                    Some(NotifyPushStatus::Disconnected) => CapabilityState::Unavailable,
+                    Some(NotifyPushStatus::Retrying) | None => CapabilityState::Checking,
+                }
+            };
+            [etag, notify_push, theming]
+        }
+    };
+    w.etag_cap_row.set(labels[0]);
+    w.notify_push_cap_row.set(labels[1]);
+    w.theming_cap_row.set(labels[2]);
 }
 
 /// `scoped`: when true (only the watch-debounce path -- see
@@ -8964,6 +8858,8 @@ async fn run_sync_round(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>, scoped: 
     // silently skipped, with no way for a user to tell which had
     // actually happened.
     let mut any_check_happened = false;
+    let mut capability_outcomes: HashMap<String, CapabilityOutcome> = HashMap::new();
+    let mut themed_accounts: HashSet<String> = HashSet::new();
 
     // Queried once here, not inside the loop below -- on-battery state
     // doesn't vary per connection, only the tier multiplier does. The
@@ -8974,6 +8870,14 @@ async fn run_sync_round(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>, scoped: 
     // gio::PowerProfileMonitor for Power Save Mode instead, which has
     // nothing to do with on-battery status specifically.
     let on_battery = on_battery_power(state).await.unwrap_or(false);
+
+    // The active account is checked even without connections, so the
+    // Connections tab can show its capabilities.
+    let active_account_id = state.config.borrow().active_account_id.clone();
+    if let Some(account) = active_account_id.as_deref().and_then(|id| accounts.iter().find(|a| a.account_id() == id)) {
+        let outcome = check_account_capabilities(state, watcher, account, force).await;
+        capability_outcomes.insert(account.account_id().to_string(), outcome);
+    }
 
     for connection in connections {
         // connections above is a snapshot taken once at the top of this
@@ -9043,11 +8947,16 @@ async fn run_sync_round(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>, scoped: 
         }
         let dirty_scope = if scoped { Some(sync::expand_dirty_scope(dirty_relative_dirs.clone())) } else { None };
 
-        // Extracted into check_account_capabilities -- see its own doc
-        // comment for the full reasoning (throttling, the theme's own
-        // per-call re-fetch, and why this is now also called directly
-        // elsewhere, not just from within this loop).
-        check_account_capabilities(state, watcher, account, force).await;
+        // At most one attempt per account per round; an indeterminate
+        // result is retried next round.
+        let capability_outcome = match capability_outcomes.get(account.account_id()) {
+            Some(outcome) => *outcome,
+            None => {
+                let outcome = check_account_capabilities(state, watcher, account, force).await;
+                capability_outcomes.insert(account.account_id().to_string(), outcome);
+                outcome
+            }
+        };
 
         // notify_push having told us something under this account
         // genuinely changed overrides the tier-multiplier scheduling
@@ -9122,25 +9031,29 @@ async fn run_sync_round(state: &Rc<AppState>, watcher: &Rc<GoaWatcher>, scoped: 
         // try_etag_skip (see bypass_etag_check just below for that
         // separate distinction).
         let skip_tier_gate = forced || pending || had_dirty_dirs || state.first_round_this_session.get();
-        if !skip_tier_gate {
-            if let Some(last_check) = state.last_full_check.borrow().get(&connection.id) {
-                if last_check.elapsed().as_secs() < effective_interval_secs {
-                    // Not covering this connection this round after all --
-                    // restore whatever was removed above (merged with
-                    // anything a racing FileMonitor event has already
-                    // added back since -- see restore_dirty_dirs' own doc
-                    // comment) so it survives for a later round instead of
-                    // being silently lost.
-                    restore_dirty_dirs(&state, &connection.id, dirty_dirs_absolute);
-                    continue; // this connection's own effective interval hasn't elapsed yet
-                }
-            }
+        let interval_elapsed = state.last_full_check.borrow().get(&connection.id)
+            .is_none_or(|last_check| last_check.elapsed().as_secs() >= effective_interval_secs);
+        if !skip_tier_gate && !interval_elapsed {
+            // Not covering this connection this round after all --
+            // restore whatever was removed above (merged with anything a
+            // racing FileMonitor event has added back since) so it
+            // survives for a later round.
+            restore_dirty_dirs(&state, &connection.id, dirty_dirs_absolute);
+            continue;
         }
         // Reaching this point means this connection is actually being
         // checked this round -- at minimum the ETag precheck just below,
         // a real network round-trip, not just this function having been
         // invoked and finding nothing due yet.
         any_check_happened = true;
+
+        // Pending-only and dirty-only rounds do not refresh the theme.
+        if (forced || interval_elapsed || state.first_round_this_session.get())
+            && capability_outcome == CapabilityOutcome::AlreadyKnown
+            && themed_accounts.insert(account.account_id().to_string())
+        {
+            refresh_account_theme(state, watcher, account).await;
+        }
 
         // bypass_etag_check: unlike skip_tier_gate above, this one
         // deliberately does NOT include `pending` -- an unresolved

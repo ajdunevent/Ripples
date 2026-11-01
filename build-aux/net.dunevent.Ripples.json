@@ -1,0 +1,57 @@
+{
+    "app-id": "net.dunevent.Ripples",
+    "runtime": "org.gnome.Platform",
+    "runtime-version": "51",
+    "sdk": "org.gnome.Sdk",
+    "sdk-extensions": [
+        "org.freedesktop.Sdk.Extension.rust-stable"
+    ],
+    "command": "ripples",
+    "finish-args": [
+        "--share=network",
+        "--share=ipc",
+        "--socket=wayland",
+        "--socket=fallback-x11",
+        "--device=dri",
+        "--filesystem=home",
+        "--talk-name=org.gnome.OnlineAccounts",
+        "--talk-name=org.kde.StatusNotifierWatcher",
+        "--own-name=org.kde.*",
+        "--system-talk-name=org.freedesktop.UPower"
+    ],
+    "build-options": {
+        "append-path": "/usr/lib/sdk/rust-stable/bin",
+        "build-args": [
+            "--share=network"
+        ],
+        "env": {
+            "CARGO_HOME": "/run/build/ripples/cargo"
+        }
+    },
+    "modules": [
+        {
+            "name": "ripples",
+            "buildsystem": "simple",
+            "build-commands": [
+                "cargo build --release --locked",
+                "install -Dm755 target/release/ripples /app/bin/ripples",
+                "install -Dm644 assets/net.dunevent.Ripples.desktop /app/share/applications/net.dunevent.Ripples.desktop",
+                "install -Dm644 assets/icons/app/net.dunevent.Ripples.svg /app/share/icons/hicolor/scalable/apps/net.dunevent.Ripples.svg",
+                "install -Dm644 assets/icons/app/net.dunevent.Ripples-symbolic.svg /app/share/icons/hicolor/symbolic/apps/net.dunevent.Ripples-symbolic.svg"
+            ],
+            "sources": [
+                {
+                    "type": "dir",
+                    "path": "..",
+                    "skip": [
+                        "target",
+                        "dist",
+                        ".git",
+                        ".flatpak",
+                        ".flatpak-builder"
+                    ]
+                }
+            ]
+        }
+    ]
+}

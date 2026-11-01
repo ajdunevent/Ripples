@@ -165,16 +165,14 @@ pub fn global_pattern_auto_removable(
 /// exactly that path without needing the tree built locally first to
 /// place a .no-sync file inside it, and without scattering .no-sync
 /// files through a deep remote-heavy tree at all. Root-anchored patterns
-/// reuse the exact same glob engine as basename ones, which has one
-/// real consequence worth knowing rather than hitting by surprise: `*`
-/// matches any run of characters INCLUDING `/`, so "/stuff/*" also
-/// matches "stuff/secrets/plotting/deep/file" -- there's no `**`
-/// distinction. Deliberate: a second path-aware glob dialect is more
-/// syntax to get wrong for a feature nothing here has asked for yet.
+/// reuse the same glob engine as basename ones. `*` and `?` never match
+/// `/`, so "/stuff/*" matches only the direct children of "stuff". A
+/// matched directory is not descended into, so that still excludes
+/// everything beneath it.
 ///
-/// Only `*` (any run of characters, including none) and `?` (exactly
-/// one character) are supported -- no character classes, no brace
-/// expansion -- since nothing in Nextcloud Desktop's own default list
+/// Only `*` (any run of characters within one path component, including
+/// none) and `?` (exactly one such character) are supported -- no
+/// character classes, no brace expansion -- since nothing in Nextcloud Desktop's own default list
 /// needs more than that, and every extra bit of syntax is one more
 /// thing to get wrong.
 ///
@@ -211,11 +209,6 @@ pub fn matches_pattern(pattern: &str, relative_path: &str, name: &str, is_direct
 /// than it sounds. Doesn't know about the existing pattern list --
 /// checking for an exact duplicate is main.rs's job, since that needs
 /// live config state this module deliberately stays free of.
-///
-/// This accepts a leading `/` (root-anchored) -- appropriate for
-/// per-connection patterns (SyncConnection::excluded_subpaths), where
-/// "the sync root" is unambiguous. See validate_global_pattern below for
-/// the global list, where it isn't.
 pub fn validate_pattern(text: &str) -> Result<(), String> {
     let (body, _directory_only) = match text.strip_suffix('/') {
         Some(stripped) => (stripped, true),
@@ -238,43 +231,24 @@ pub fn validate_pattern(text: &str) -> Result<(), String> {
     if !anchored && core.contains('/') {
         return Err(
             "Contains \"/\" but doesn't start with one, so as a plain name it can never \
-             match anything -- start it with \"/\" to match a full path from the sync root."
+             match anything -- start it with \"/\" to match a full path from the root of \
+             the Sync Connection."
                 .to_string(),
         );
     }
     Ok(())
 }
 
-/// Global-list variant of validate_pattern: additionally rejects a
-/// leading `/` outright, rather than accepting it. Root-anchoring means
-/// "relative to the sync root" -- fine when there's exactly one sync
-/// root a pattern could possibly mean (a single connection), meaningless
-/// when applied globally across every connection at once, each with its
-/// own different root. A global "/secrets/plotting" would silently mean
-/// something different (or nothing at all) depending on which
-/// connection's round happens to be running -- confusing regardless of
-/// whether it happens to match by coincidence. Per-connection anchored
-/// patterns (SyncConnection::excluded_subpaths) don't go through this
-/// function at all -- they're built by the app from an actual picked
-/// path (see the folder-exclusion pickers), never typed freehand, so
-/// there's no UI path for a user to type a leading "/" into the global
-/// list in the first place; this is the backstop, not the only guard.
-pub fn validate_global_pattern(text: &str) -> Result<(), String> {
-    if text.starts_with('/') {
-        return Err("Patterns starting with \"/\" aren't supported here.".to_string());
-    }
-    validate_pattern(text)
-}
-
-
-/// to read in one sitting on purpose, fine at filename lengths.
+/// Whole-string glob. `*` and `?` never match `/`, so an anchored pattern
+/// cannot span path components.
 fn glob_match(pattern: &[u8], name: &[u8]) -> bool {
     match (pattern.first(), name.first()) {
         (None, None) => true,
         (Some(b'*'), _) => {
-            glob_match(&pattern[1..], name) || (!name.is_empty() && glob_match(pattern, &name[1..]))
+            glob_match(&pattern[1..], name)
+                || (name.first().is_some_and(|&n| n != b'/') && glob_match(pattern, &name[1..]))
         }
-        (Some(b'?'), Some(_)) => glob_match(&pattern[1..], &name[1..]),
+        (Some(b'?'), Some(&n)) if n != b'/' => glob_match(&pattern[1..], &name[1..]),
         (Some(&p), Some(&n)) if p == n => glob_match(&pattern[1..], &name[1..]),
         _ => false,
     }
@@ -331,16 +305,14 @@ mod pattern_tests {
     }
 
     #[test]
-    fn validate_global_rejects_root_anchored() {
-        // The whole reason this variant exists: a leading "/" means
-        // "relative to *a* sync root," which is ambiguous the moment
-        // there's more than one connection with a different root.
-        assert!(validate_global_pattern("/stuff/secrets/plotting").is_err());
-        assert!(validate_global_pattern("/stuff/secrets/").is_err());
-        // Ordinary patterns are unaffected -- same acceptance as the
-        // per-connection variant for anything that isn't root-anchored.
-        assert!(validate_global_pattern("*.tmp").is_ok());
-        assert!(validate_global_pattern("node_modules/").is_ok());
+    fn wildcards_stay_within_one_component() {
+        assert!(matches_pattern("/ca*e", "cache", "cache", true));
+        assert!(!matches_pattern("/ca*e", "cats/must-have", "must-have", false));
+        assert!(!matches_pattern("/ca?e", "ca/e", "e", false));
+        assert!(matches_pattern("/stuff/*", "stuff/secrets", "secrets", true));
+        assert!(!matches_pattern("/stuff/*", "stuff/secrets/plotting", "plotting", false));
+        assert!(matches_pattern("/backup/*.zip", "backup/a.zip", "a.zip", false));
+        assert!(!matches_pattern("/backup/*.zip", "backup/old/a.zip", "a.zip", false));
     }
 
     #[test]

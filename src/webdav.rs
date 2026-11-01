@@ -288,6 +288,10 @@ pub struct RemoteEntry {
     pub fileid: Option<String>,
 }
 
+// reqwest already enables keepalive (15 s idle, 15 s interval, 3 retries). The
+// user timeout additionally bounds unacknowledged data, which keepalive misses.
+const TCP_USER_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// For every metadata-only call (PROPFIND, MKCOL, DELETE, MOVE) -- a
 /// single overall request timeout is safe and desirable here, since
 /// none of these ever move a meaningful amount of body data.
@@ -314,6 +318,7 @@ fn metadata_client() -> reqwest::blocking::Client {
         reqwest::blocking::Client::builder()
             .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(30))
+            .tcp_user_timeout(TCP_USER_TIMEOUT)
             .build()
             .expect("a client with just timeouts configured should never fail to build")
     }).clone()
@@ -341,6 +346,7 @@ fn transfer_client() -> reqwest::blocking::Client {
     CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()
             .connect_timeout(Duration::from_secs(30))
+            .tcp_user_timeout(TCP_USER_TIMEOUT)
             .build()
             .expect("a client with just a connect timeout configured should never fail to build")
     }).clone()
@@ -771,15 +777,8 @@ pub fn mkcol(url: &str, username: &str, password: &str) -> Result<(), WebDavErro
     Ok(())
 }
 
-/// DELETE -- a single item, file or collection. For a non-empty
-/// collection this is recursive by the protocol's own design (Depth:
-/// infinity is the only depth a DELETE on a collection can even
-/// request) -- but see remote_delete_recursive in sync.rs (already
-/// written, ahead of this module, once the gvfsd-dav-specific
-/// recursive-DELETE inconsistency was confirmed) for why the migrated
-/// call site won't actually rely on that: it already deletes children
-/// individually and calls this function once per item, never on a
-/// non-empty collection.
+/// DELETE of a single item, file or collection. A non-empty collection is
+/// deleted recursively by the server. A 404 counts as success.
 pub fn delete(url: &str, username: &str, password: &str) -> Result<(), WebDavError> {
     let response = retry_once(|| {
         Ok(metadata_client()

@@ -4,14 +4,13 @@
 // on anything interesting, which meant the UI had no way to show
 // anything beyond "syncing / not syncing" -- this is the piece the TODO
 // flagged as blocking the richer Status tab (worst-first state plus a
-// capped scrolling log). sync.rs emits SyncEvent values on an
+// log). sync.rs emits SyncEvent values on an
 // async_channel; main.rs owns the receiving end, folds them into a
-// SyncState and a StatusLog, and reflects both in the Status tab.
+// SyncState and the on-disk log, and reflects the state in the Status tab.
 //
 // Deliberately NOT a general logging framework -- just enough structure
 // to drive the two things the Status tab actually needs to show.
 
-use std::collections::VecDeque;
 
 /// Worst-first ordering: Disconnected > Syncing > Scanning > Idle.
 /// Derives Ord so "the worse of these two states" is just `.max()` --
@@ -410,52 +409,3 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// Ring buffer of already-formatted, timestamped log lines, feeding the
-/// in-app Session tab's own live display. Deliberately small now, not a
-/// full-session history -- disk_log.rs's own on-disk, per-session file
-/// is the actual, permanent, canonical record (see
-/// flush_disk_log_now/export_log_button's own handler in main.rs, which
-/// exports that file directly rather than re-serializing from this
-/// structure). This only ever needs to hold "recent enough to be useful
-/// to glance at live," not "everything that's happened this session" --
-/// 999 lines is generous headroom over what's actually visible on
-/// screen at once even on a large display, with plenty of room to
-/// scroll back a little further. Previously much larger (was raised to
-/// 20000 at one point, during a search for a UI-responsiveness cause
-/// that turned out to be unrelated to this cap entirely -- see
-/// run_sync_round's own notify_push/tier-multiplier fixes for the real
-/// cause), back when this was still the only place any session history
-/// existed at all; now that disk_log.rs exists as the genuine, complete
-/// record, keeping a second, large, separately-capped copy in memory
-/// alongside it was pure redundancy, not a real safeguard.
-pub struct StatusLog {
-    lines: VecDeque<String>,
-}
-
-pub const STATUS_LOG_CAPACITY: usize = 9_999;
-
-impl StatusLog {
-    pub fn new() -> Self {
-        Self { lines: VecDeque::with_capacity(STATUS_LOG_CAPACITY) }
-    }
-
-    pub fn push(&mut self, line: String) {
-        if self.lines.len() >= STATUS_LOG_CAPACITY {
-            self.lines.pop_front();
-        }
-        self.lines.push_back(line);
-    }
-
-    /// Clears all lines -- the whole log, not a partial trim. Used by
-    /// the Status tab's own "clear log" button; a fresh start for the
-    /// in-app view, distinct from exporting (which reads the log
-    /// without touching it at all).
-    pub fn clear(&mut self) {
-        self.lines.clear();
-    }
-
-    /// Most-recent-first, for display.
-    pub fn recent(&self) -> impl Iterator<Item = &String> {
-        self.lines.iter().rev()
-    }
-}

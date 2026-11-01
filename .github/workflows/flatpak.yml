@@ -1,0 +1,86 @@
+name: Flatpak
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  APP_ID: net.dunevent.Ripples
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          fi
+
+      - name: Install Flatpak tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          # Ubuntu 24.04 blocks the unprivileged user namespaces bwrap needs. Unconfirmed for 26.04.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Build
+        # Build output goes outside the checkout: the manifest's dir source
+        # copies the whole repository.
+        run: |
+          flatpak-builder --user --arch=${{ matrix.arch }} \
+            --install-deps-from=flathub --disable-rofiles-fuse --force-clean \
+            --repo="$RUNNER_TEMP/repo" "$RUNNER_TEMP/builddir" \
+            build-aux/${{ env.APP_ID }}.json
+
+      - name: Bundle
+        run: |
+          flatpak build-bundle --arch=${{ matrix.arch }} \
+            --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+            "$RUNNER_TEMP/repo" \
+            "Ripples-${VERSION}-${{ matrix.arch }}.flatpak" "$APP_ID"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ripples-${{ matrix.arch }}
+          path: Ripples-*.flatpak
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ripples-*
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" Ripples-*.flatpak --clobber

@@ -912,7 +912,8 @@ pub async fn retry_single_item(
     // hot path the way the ordinary recursive walk is.
     let local_dir_owned = local_dir.clone();
     let local_children = run_blocking(move || list_local(&local_dir_owned)).await?;
-    let remote_children = list_remote_with_recovery(target, &remote_dir_url).await?;
+    let list_track = crate::watchdog::track("single-item retry", relative_path);
+    let remote_children = list_remote_with_recovery(target, &remote_dir_url, &list_track).await?;
     let local_entry = local_children.get(name);
     let remote_entry = remote_children.get(name);
 
@@ -1135,7 +1136,7 @@ fn list_local(dir: &Path) -> std::io::Result<std::collections::HashMap<String, L
 /// the one place a future, genuinely-needed retry policy (network
 /// blips, as opposed to a wedged daemon) would go, without touching
 /// every caller again.
-async fn list_remote_with_recovery(target: &SyncTarget, url: &str) -> Result<HashMap<String, RemoteEntry>, SyncError> {
+async fn list_remote_with_recovery(target: &SyncTarget, url: &str, track: &crate::watchdog::Track) -> Result<HashMap<String, RemoteEntry>, SyncError> {
     // Acquired here, inside this thin wrapper, rather than at each of
     // its own call sites -- safe specifically because this function is
     // only ever called from the normal recursive walk, never from a
@@ -1146,7 +1147,9 @@ async fn list_remote_with_recovery(target: &SyncTarget, url: &str) -> Result<Has
     // current" work Pool 1's own reserve exists to protect, see
     // SyncTarget::discovery_pool's own doc comment for the full
     // reasoning.
+    track.step("waiting for discovery permit");
     let _permit = target.discovery_pool.acquire(&target.content_semaphore, "Pool 1 (discovery)").await;
+    track.step("PROPFIND");
     target.webdav_list(url).await.map_err(Into::into)
 }
 
@@ -1589,6 +1592,8 @@ pub struct Semaphore {
     // once already, not just this session's own original "only one
     // thing seems to actually be processing at a time" question.
     in_use: Rc<Cell<u32>>,
+    // True only for the app-wide pool, whose usage count the watchdog reports.
+    publish: bool,
 }
 
 impl Semaphore {
@@ -1626,7 +1631,7 @@ impl Semaphore {
         for _ in 0..capacity {
             tx.try_send(()).expect("just-created bounded channel sized to exactly capacity");
         }
-        Self { tx, rx, in_use: Rc::new(Cell::new(0)) }
+        Self { tx, rx, in_use: Rc::new(Cell::new(0)), publish: capacity == Self::MAX_PERMITS }
     }
 
     pub async fn acquire(&self) -> SemaphoreGuard {
@@ -1651,11 +1656,14 @@ impl Semaphore {
 
     fn on_acquired(&self) -> SemaphoreGuard {
         self.in_use.set(self.in_use.get() + 1);
+        if self.publish {
+            crate::watchdog::set_permits_in_use(self.in_use.get());
+        }
         // [debug] -- see in_use's own doc comment above.
         if crate::is_debug_enabled() {
             eprintln!("[{}] [debug] semaphore: permit acquired, {} now in use (of {})", now_hms(), self.in_use.get(), Self::MAX_PERMITS);
         }
-        SemaphoreGuard { tx: self.tx.clone(), in_use: self.in_use.clone() }
+        SemaphoreGuard { tx: self.tx.clone(), in_use: self.in_use.clone(), publish: self.publish }
     }
 }
 
@@ -1664,6 +1672,7 @@ pub struct SemaphoreGuard {
     // See Semaphore::in_use's own doc comment -- a permanent debug
     // facility, not scaffolding meant to come back out.
     in_use: Rc<Cell<u32>>,
+    publish: bool,
 }
 
 impl Drop for SemaphoreGuard {
@@ -1675,6 +1684,9 @@ impl Drop for SemaphoreGuard {
         // being full.
         let _ = self.tx.try_send(());
         self.in_use.set(self.in_use.get().saturating_sub(1));
+        if self.publish {
+            crate::watchdog::set_permits_in_use(self.in_use.get());
+        }
         // [debug] -- see Semaphore::in_use's own doc comment.
         if crate::is_debug_enabled() {
             eprintln!("[{}] [debug] semaphore: permit released, {} now in use", now_hms(), self.in_use.get());
@@ -1776,6 +1788,7 @@ fn sync_directory<'a>(
     events_tx: &'a async_channel::Sender<SyncEvent>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SyncError>> + 'a>> {
     Box::pin(async move {
+        let track = crate::watchdog::track("walk", relative);
         // remote_dir_url built fresh here from target's own base URL +
         // this directory's relative path, rather than threaded down as
         // a parameter the way remote_dir: &gio::File used to be -- a
@@ -1815,7 +1828,8 @@ fn sync_directory<'a>(
         // afterward, rather than needing one shared error type to
         // short-circuit through.
         let local_future = run_blocking(move || list_local(&local_dir_owned));
-        let remote_future = list_remote_with_recovery(target, &remote_dir_url);
+        track.step("listing local and remote");
+        let remote_future = list_remote_with_recovery(target, &remote_dir_url, &track);
         let (local_result, remote_result) = futures_util::future::join(local_future, remote_future).await;
         let local_children = local_result?;
         let remote_children = remote_result?;
@@ -1849,6 +1863,7 @@ fn sync_directory<'a>(
                     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
                     let old_enough = remote.mtime.is_some_and(|mtime| now.saturating_sub(mtime) >= MIN_TEMP_FILE_AGE_SECS as i64);
                     if old_enough {
+                        track.step("waiting for permit (temp cleanup)");
                         let _permit = target.content_semaphore.acquire().await;
                         // See RemoteWriteGuard's own doc comment --
                         // included even for this rare, session-start-
@@ -1878,6 +1893,7 @@ fn sync_directory<'a>(
         let mut excluded = exclude::load(local_dir);
         if remote_children.contains_key(exclude::NO_SYNC_FILENAME) {
             let no_sync_url = webdav::build_url(&remote_dir_url, exclude::NO_SYNC_FILENAME);
+            track.step("reading .nosync");
             if let Ok(bytes) = target.webdav_download_to_memory(&no_sync_url).await {
                 excluded.extend(exclude::parse(&String::from_utf8_lossy(&bytes)));
             }
@@ -1983,6 +1999,7 @@ fn sync_directory<'a>(
         // take its siblings down with it, and that's unchanged here,
         // just now potentially several such items resolving at once
         // instead of strictly one after another.
+        track.children("walking subdirectories");
         futures_util::stream::iter(directory_names).for_each_concurrent(Some(metadata_concurrency), |name| {
             let excluded = &excluded;
             let local_children = &local_children;
@@ -2054,6 +2071,7 @@ fn sync_directory<'a>(
             }
         }).await;
 
+        track.children("walking files");
         futures_util::stream::iter(file_names).for_each_concurrent(Some(content_concurrency), |name| {
             let excluded = &excluded;
             let local_children = &local_children;
@@ -2359,60 +2377,56 @@ async fn is_fully_cleanable(
     Ok(Cleanability::FullyCleanable)
 }
 
-/// Deletes everything under `remote_dir` individually -- depth-first,
-/// each file as it's found, each subdirectory only after its own
-/// contents are already gone, then `remote_dir` itself last -- rather
-/// than a single, top-level recursive DELETE (WebDAV's Depth: infinity,
-/// the only depth a DELETE on a non-empty collection can even request).
-/// See this function's own call site in sync_child_directory for the
-/// real, repeatedly reproduced bug this exists to fix: the recursive
-/// form kept failing with "Directory not empty" even immediately after
-/// this app's own listing confirmed the collection held nothing but
-/// already-verified content.
-///
-/// Makes no cleanability decisions of its own -- only ever called after
-/// is_fully_cleanable has already confirmed the entire subtree safe to
-/// remove, on that same confirmed-safe content, so this doesn't
-/// re-check exclusions or journal state, just performs the removal a
-/// different, more reliable way. Re-lists rather than reusing whatever
-/// is_fully_cleanable already saw -- some real time has passed since
-/// that check, and a plain, fresh listing right before acting is the
-/// same discipline every other mutating path in this file already
-/// follows.
+/// Deletes a remote directory that is_fully_cleanable has already confirmed
+/// safe to remove, so no exclusion or journal checks are made here. One
+/// collection DELETE is tried first, since a server removes the whole subtree
+/// in a single request. If that fails, for example on a server or proxy
+/// timeout with a very large tree, the items are deleted individually.
 async fn remote_delete_recursive(target: &SyncTarget, remote_dir_url: &str, events_tx: &async_channel::Sender<SyncEvent>) -> Result<(), SyncError> {
-    // Acquired per individual call, not held across the whole recursive
-    // deletion -- this function is only ever reached from the normal
-    // walk's own DeleteRemote-folder handling, never from a conflict
-    // resolution, so no risk of gating the "resolutions bypass the
-    // queue" behavior. Per-call rather than one permit held for the
-    // entire recursion so a large subtree being deleted doesn't starve
-    // every other concurrent operation for as long as that takes.
-    let children = {
+    let whole_tree = {
         let _permit = target.content_semaphore.acquire().await;
-        target.webdav_list(remote_dir_url).await?
+        let _remote_write_guard = RemoteWriteGuard::new(events_tx);
+        target.webdav_delete(remote_dir_url).await
     };
-    for (name, entry) in children {
-        let child_url = webdav::build_url(remote_dir_url, &name);
-        if entry.is_dir {
-            // Boxed for the same reason as is_fully_cleanable's own
-            // recursive call -- async fns can't otherwise recurse into
-            // themselves, since the compiler can't determine a finite
-            // size for the resulting state machine.
-            Box::pin(remote_delete_recursive(target, &child_url, events_tx)).await?;
-        } else {
-            let _permit = target.content_semaphore.acquire().await;
-            // See RemoteWriteGuard's own doc comment -- one per
-            // individual delete here, deliberately: a whole subtree
-            // being deleted can fan out into many of these, and each
-            // one still needs begin_remote_write/end_remote_write's own
-            // pending_remote_writes count to correctly reflect it, even
-            // though the batching this whole design relies on means
-            // only the very first one across this entire round actually
-            // fires a pre-flight check.
-            let _remote_write_guard = RemoteWriteGuard::new(events_tx);
-            target.webdav_delete(&child_url).await?;
+    match whole_tree {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            eprintln!("sync[{}]: deleting {remote_dir_url} in one request failed ({e}); deleting its items individually", target.connection_id);
+            remote_delete_individually(target, remote_dir_url, events_tx).await
         }
     }
+}
+
+/// Fallback for remote_delete_recursive. Children are deleted with the same
+/// concurrency as the rest of the walk, and every request still takes a
+/// permit from the shared pool, so no more than MAX_PERMITS run at once.
+async fn remote_delete_individually(target: &SyncTarget, remote_dir_url: &str, events_tx: &async_channel::Sender<SyncEvent>) -> Result<(), SyncError> {
+    use futures_util::TryStreamExt;
+
+    let children = {
+        let _permit = target.content_semaphore.acquire().await;
+        match target.webdav_list(remote_dir_url).await {
+            Ok(children) => children,
+            // A timed-out whole-tree DELETE may still have completed on the server.
+            Err(webdav::WebDavError::UnexpectedStatus { status: 404, .. }) => return Ok(()),
+            Err(e) => return Err(e.into()),
+        }
+    };
+    futures_util::stream::iter(children)
+        .map(|(name, entry)| async move {
+            let child_url = webdav::build_url(remote_dir_url, &name);
+            if entry.is_dir {
+                Box::pin(remote_delete_recursive(target, &child_url, events_tx)).await
+            } else {
+                let _permit = target.content_semaphore.acquire().await;
+                // One guard per delete: each needs its own pending_remote_writes count.
+                let _remote_write_guard = RemoteWriteGuard::new(events_tx);
+                target.webdav_delete(&child_url).await.map_err(SyncError::from)
+            }
+        })
+        .buffer_unordered(Semaphore::MAX_PERMITS)
+        .try_for_each(|()| async { Ok::<(), SyncError>(()) })
+        .await?;
     let _permit = target.content_semaphore.acquire().await;
     let _remote_write_guard = RemoteWriteGuard::new(events_tx);
     target.webdav_delete(remote_dir_url).await?;
@@ -2446,7 +2460,7 @@ async fn sync_child_directory(
     recurse: bool,
     events_tx: &async_channel::Sender<SyncEvent>,
 ) -> Result<(), SyncError> {
-    crate::watchdog::note("directory", child_relative);
+    let track = crate::watchdog::track("directory", child_relative);
     // Already handled by a rename pairing found elsewhere THIS round --
     // see SyncTarget::renamed_away's own doc comment for why this check
     // has to come first. For a directory specifically this isn't just a
@@ -2499,9 +2513,11 @@ async fn sync_child_directory(
                     // near-instant even for a large subtree (WebDAV
                     // MOVE defaults to Depth: infinity, handled
                     // entirely server-side).
+                    track.step("waiting for permit (rename)");
                     let _permit = target.content_semaphore.acquire().await;
                     // See RemoteWriteGuard's own doc comment.
                     let _remote_write_guard = RemoteWriteGuard::new(events_tx);
+                    track.step("rename MOVE");
                     match webdav_move_serialized(target, &old_remote_url, &child_remote_url, false, None).await {
                         Ok(()) => {
                             journal::rename_synced_prefix(journal_conn, &target.connection_id, &matched.relative_path, child_relative, now)?;
@@ -2525,6 +2541,7 @@ async fn sync_child_directory(
                             // want it; a later, ordinary walk reconciles
                             // them normally.
                             return if recurse {
+                                track.children("walking directory");
                                 sync_directory(journal_conn, target, &child_local, child_relative, events_tx).await
                             } else {
                                 Ok(())
@@ -2585,6 +2602,7 @@ async fn sync_child_directory(
                             // reasoning as the remote-direction block's
                             // own identical return just above.
                             return if recurse {
+                                track.children("walking directory");
                                 sync_directory(journal_conn, target, &child_local, child_relative, events_tx).await
                             } else {
                                 Ok(())
@@ -2682,6 +2700,7 @@ async fn sync_child_directory(
                     return Ok(());
                 }
             }
+            track.step("checking if cleanable");
             match is_fully_cleanable(journal_conn, target, exists_locally, &child_local, &child_remote_url, child_relative).await? {
                 Cleanability::RealContent => {
                     // Real, non-excluded content survived somewhere in
@@ -2712,34 +2731,11 @@ async fn sync_child_directory(
                         // natively and has never shown this problem --
                         // this side is untouched.
                         let path = child_local.clone();
+                        track.step("deleting local directory");
                         run_blocking(move || std::fs::remove_dir_all(path)).await.map_err(Into::into)
                     } else {
-                        // NOT a single recursive delete_future() on the
-                        // directory itself (WebDAV's Depth: infinity)
-                        // any more -- real, repeatedly reported bug: this
-                        // kept failing with "Directory not empty" even
-                        // immediately after this app's own listing (the
-                        // very same one is_fully_cleanable just used to
-                        // confirm the whole subtree safe) reported
-                        // nothing but known content -- confirmed
-                        // reproducing seven separate times across 40
-                        // minutes on one directory alone, including
-                        // right after a forced remount, which ruled out
-                        // a GVfs client-side mount cache as the cause.
-                        // Since the listing and the delete both go
-                        // through the same mount and the listing is
-                        // provably accurate, whatever's inconsistent
-                        // lives inside gvfsd-dav's own handling of a
-                        // recursive collection DELETE specifically (or
-                        // between it and the server), not in anything
-                        // this app's own logic gets wrong. Deleting each
-                        // item individually -- depth-first, files then
-                        // the now-empty directory -- sidesteps that
-                        // recursive codepath entirely: more requests,
-                        // but every one of them a plain, single-item
-                        // DELETE the same shape already used everywhere
-                        // else in this app, on content is_fully_cleanable
-                        // has already fully verified safe.
+                        // A single collection DELETE is tried first; see remote_delete_recursive.
+                        track.step("deleting remote directory");
                         remote_delete_recursive(target, &child_remote_url, events_tx).await
                     };
                     if let Err(e) = outcome {
@@ -2794,9 +2790,11 @@ async fn sync_child_directory(
         std::fs::create_dir_all(&child_local)?;
     }
     if !exists_remotely {
+        track.step("waiting for permit (MKCOL)");
         let _permit = target.content_semaphore.acquire().await;
         // See RemoteWriteGuard's own doc comment.
         let _remote_write_guard = RemoteWriteGuard::new(events_tx);
+        track.step("MKCOL");
         match target.webdav_mkcol(&child_remote_url).await {
             Ok(()) => {}
             // MKCOL on a collection that already exists -- servers
@@ -2846,6 +2844,7 @@ async fn sync_child_directory(
         }
     }
 
+    track.children("walking directory");
     sync_directory(journal_conn, target, &child_local, child_relative, events_tx).await
 }
 
@@ -2884,7 +2883,7 @@ async fn sync_child_file(
     skip_settling_checks: bool,
     events_tx: &async_channel::Sender<SyncEvent>,
 ) -> Result<(), SyncError> {
-    crate::watchdog::note("item", child_relative);
+    let track = crate::watchdog::track("item", child_relative);
     // Already handled by a rename pairing found elsewhere THIS round --
     // see SyncTarget::renamed_away's own doc comment. Without this, the
     // old (renamed-away) path's own position here would decide
@@ -2985,9 +2984,11 @@ async fn sync_child_file(
                     // block for why: MOVE is a single, metadata-only
                     // request with nothing to stream progress on, not a
                     // content transfer.
+                    track.step("waiting for permit (rename)");
                     let move_permit = target.content_semaphore.acquire().await;
                     // See RemoteWriteGuard's own doc comment.
                     let _remote_write_guard = RemoteWriteGuard::new(events_tx);
+                    track.step("rename MOVE");
                     match webdav_move_serialized(target, &old_remote_url, &remote_url, false, None).await {
                         Ok(()) => {
                             // Pool 3's own permit released explicitly,
@@ -3008,7 +3009,9 @@ async fn sync_child_file(
                             // expensive work.
                             drop(move_permit);
                             let info = {
+                                track.step("waiting for confirm permit");
                                 let _confirm_permit = target.confirm_pool.acquire(&target.content_semaphore, "Pool 2 (confirm/detect)").await;
+                                track.step("confirm stat");
                                 target.webdav_stat(&remote_url).await?
                             };
                             let new_etag = info.etag.unwrap_or_default();
@@ -3373,7 +3376,8 @@ async fn sync_child_file(
         }
     }
 
-    execute_action(action, journal_conn, target, &local_path, &remote_url, child_relative, current_local, current_remote_etag, remote_entry.and_then(|e| e.fileid.as_deref()), remote_entry.map(|e| e.size), remote_entry.and_then(|e| e.mtime), now, events_tx).await
+    track.step("executing action");
+    execute_action(action, journal_conn, target, &local_path, &remote_url, child_relative, current_local, current_remote_etag, remote_entry.and_then(|e| e.fileid.as_deref()), remote_entry.map(|e| e.size), remote_entry.and_then(|e| e.mtime), now, events_tx, &track).await
         .map_err(|e| tag_webdav_action(e, action.label()))
 }
 
@@ -3446,6 +3450,7 @@ async fn execute_action(
     remote_mtime: Option<i64>,
     now: i64,
     events_tx: &async_channel::Sender<SyncEvent>,
+    track: &crate::watchdog::Track,
 ) -> Result<(), SyncError> {
     match action {
         SyncAction::Noop => {}
@@ -3486,7 +3491,9 @@ async fn execute_action(
             if crate::is_debug_enabled() {
                 eprintln!("[{}] [debug] {child_relative}: acquiring permit", now_hms());
             }
+            track.step("waiting for permit (upload)");
             let _permit = target.content_semaphore.acquire().await;
+            track.step("uploading");
             if crate::is_debug_enabled() {
                 eprintln!("[{}] [debug] {child_relative}: permit acquired, starting upload_temp_first", now_hms());
             }
@@ -3567,7 +3574,9 @@ async fn execute_action(
                 }
             }
             // Same reasoning as Upload's own permit acquisition above.
+            track.step("waiting for permit (download)");
             let _permit = target.content_semaphore.acquire().await;
+            track.step("downloading");
             let _ = events_tx.try_send(SyncEvent::TransferStarted {
                 connection: target.connection_name.clone(),
                 path: child_relative.to_string(),
@@ -3712,7 +3721,9 @@ async fn execute_action(
         }
 
         SyncAction::DeleteRemote => {
+            track.step("waiting for permit (delete remote)");
             let _permit = target.content_semaphore.acquire().await;
+            track.step("deleting remote item");
             // See RemoteWriteGuard's own doc comment. `?` right after
             // this is exactly why it's a guard, not a plain increment/
             // decrement pair -- a failed delete still needs end_remote_

@@ -2133,6 +2133,7 @@ dependencies = [
 name = "ripples"
 version = "0.1.0"
 dependencies = [
+ "ashpd",
  "async-channel",
  "async-io",
  "boot-time",
