@@ -1,3 +1,22 @@
+# Builds this project's Flatpak for x86_64 and aarch64. A pushed v* tag also
+# publishes a GitHub release with the bundles.
+#
+# Nothing here is project-specific. build-aux/ must hold exactly one Flatpak
+# manifest, which supplies the app ID, branch and build steps.
+#
+# The release assets feed ajdunevent/flatpak-repo, a signed Flatpak remote
+# hosted on GitHub Pages. Its README describes the setup. Contract with it:
+#   - Assets are named <AppName>-<arch>-latest.flatpak, where AppName is the
+#     last component of the app ID (net.dunevent.Ralf gives Ralf).
+#   - The project has a line in flatpak-repo/apps.txt: "<owner>/<repo> <AppName>".
+#   - Secret FLATPAK_REPO_TOKEN (fine-grained token, "Actions: Read and write"
+#     on flatpak-repo only) lets the release job start flatpak-repo's publish
+#     workflow. Without it, flatpak-repo picks up releases on its own schedule
+#     (every six hours).
+#
+# The aarch64 job runs on a native arm runner, which GitHub provides free for
+# public repositories only.
+
 name: Flatpak
 
 on:
@@ -7,9 +26,6 @@ on:
 
 permissions:
   contents: read
-
-env:
-  APP_ID: net.dunevent.Ripples
 
 jobs:
   build:
@@ -22,9 +38,33 @@ jobs:
           - arch: aarch64
             runner: ubuntu-26.04-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+
+      - name: Find manifest
+        # Exactly one manifest must live in build-aux/. Other JSON files there
+        # (cargo-sources.json, for example) are ignored.
+        run: |
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          import glob, json, sys
+          found = []
+          for path in sorted(glob.glob('build-aux/*.json')):
+              try:
+                  data = json.load(open(path))
+              except ValueError:
+                  continue
+              if isinstance(data, dict) and 'modules' in data and (data.get('app-id') or data.get('id')):
+                  found.append((path, data))
+          if len(found) != 1:
+              sys.exit('Expected exactly one Flatpak manifest in build-aux/, found %d' % len(found))
+          path, data = found[0]
+          app_id = data.get('app-id') or data['id']
+          print(f'MANIFEST={path}')
+          print(f'APP_ID={app_id}')
+          print(f'APP_NAME={app_id.rsplit(".", 1)[-1]}')
+          print(f'BRANCH={data.get("branch") or data.get("default-branch") or "master"}')
+          PY
 
       - name: Set version
         run: |
@@ -39,28 +79,28 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y flatpak flatpak-builder
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          # Ubuntu 24.04 blocks the unprivileged user namespaces bwrap needs. Unconfirmed for 26.04.
+          # Ubuntu 24.04 blocks the unprivileged user namespaces bwrap needs.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Build
-        # Build output goes outside the checkout: the manifest's dir source
-        # copies the whole repository.
+        # Build output and builder state stay outside the checkout: a manifest
+        # with a dir source copies the whole repository.
         run: |
           flatpak-builder --user --arch=${{ matrix.arch }} \
             --install-deps-from=flathub --disable-rofiles-fuse --force-clean \
-            --repo="$RUNNER_TEMP/repo" "$RUNNER_TEMP/builddir" \
-            build-aux/${{ env.APP_ID }}.json
+            --state-dir="$RUNNER_TEMP/fb-state" \
+            --repo="$RUNNER_TEMP/repo" "$RUNNER_TEMP/builddir" "$MANIFEST"
 
       - name: Bundle
         run: |
           flatpak build-bundle --arch=${{ matrix.arch }} \
             --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
             "$RUNNER_TEMP/repo" \
-            "Ripples-${VERSION}-${{ matrix.arch }}.flatpak" "$APP_ID"
+            "${APP_NAME}-${VERSION}-${{ matrix.arch }}.flatpak" "$APP_ID" "$BRANCH"
 
       - uses: actions/upload-artifact@v7
         with:
-          path: Ripples-*.flatpak
+          path: ${{ env.APP_NAME }}-*.flatpak
           archive: false
           if-no-files-found: error
 
@@ -73,7 +113,6 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: Ripples-*
           merge-multiple: true
 
       - name: Publish release
@@ -81,13 +120,31 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          shopt -s nullglob
+          bundles=(*-"${GITHUB_REF_NAME}"-x86_64.flatpak)
+          (( ${#bundles[@]} == 1 )) || { echo "Expected one x86_64 bundle, found ${#bundles[@]}" >&2; exit 1; }
+          # AppName is everything before the first '-', so it cannot contain one.
+          name=${bundles[0]%%-*}
           # Fixed names give stable URLs under /releases/latest/download/.
           for arch in x86_64 aarch64; do
-            cp "Ripples-${GITHUB_REF_NAME}-${arch}.flatpak" "Ripples-${arch}-latest.flatpak"
+            cp "${name}-${GITHUB_REF_NAME}-${arch}.flatpak" "${name}-${arch}-latest.flatpak"
           done
           # A tag with a hyphen (v0.1.0-rc1) is a pre-release and never "latest".
           flags=()
           [[ "$GITHUB_REF_NAME" == *-* ]] && flags+=(--prerelease)
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
             || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes "${flags[@]}"
-          gh release upload "$GITHUB_REF_NAME" Ripples-*.flatpak --clobber
+          gh release upload "$GITHUB_REF_NAME" "${name}"-*.flatpak --clobber
+
+      - name: Update Flatpak repository
+        # Triggers ajdunevent/flatpak-repo to republish; see the header comment.
+        env:
+          GH_TOKEN: ${{ secrets.FLATPAK_REPO_TOKEN }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "FLATPAK_REPO_TOKEN is not set; skipping."
+            exit 0
+          fi
+          # Pre-releases are not published to the repository.
+          [[ "$GITHUB_REF_NAME" == *-* ]] && exit 0
+          gh workflow run publish.yml --repo ajdunevent/flatpak-repo
