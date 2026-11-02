@@ -4,7 +4,7 @@
 # Nothing here is project-specific. build-aux/ must hold exactly one Flatpak
 # manifest, which supplies the app ID, branch and build steps.
 #
-# The release assets feed ajdunevent/flatpak-repo, a signed Flatpak remote
+# The release assets feed ajdunevent/AJHub, a signed Flatpak remote
 # hosted on GitHub Pages. Its README describes the setup. Contract with it:
 #   - Assets are named <AppName>-<arch>-latest.flatpak, where AppName is the
 #     last component of the app ID (net.dunevent.Ralf gives Ralf).
@@ -137,7 +137,7 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" "${name}"-*.flatpak --clobber
 
       - name: Update Flatpak repository
-        # Triggers ajdunevent/flatpak-repo to republish; see the header comment.
+        # Triggers ajdunevent/AJHub to republish; see the header comment.
         env:
           GH_TOKEN: ${{ secrets.FLATPAK_REPO_TOKEN }}
         run: |
@@ -147,4 +147,4 @@ jobs:
           fi
           # Pre-releases are not published to the repository.
           [[ "$GITHUB_REF_NAME" == *-* ]] && exit 0
-          gh workflow run publish.yml --repo ajdunevent/flatpak-repo
+          gh workflow run publish.yml --repo ajdunevent/AJHub
