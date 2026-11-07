@@ -1,0 +1,65 @@
+# For an app developed on Forgejo and push-mirrored to GitHub. Copy this file to
+# .forgejo/workflows/tag.yml in the app's repository.
+#
+# When a push to main adds a release to the app's metainfo, this workflow tags it on
+# Forgejo. The mirror then carries the tag to GitHub, where the FrogPak releaser, with
+# create-tags: false, builds and releases it. A tag made on GitHub instead would be
+# deleted by the mirror's next sync.
+#
+# GitHub never reads .forgejo/; Forgejo reads only .forgejo/workflows/ once it exists,
+# so neither runs the other's workflows.
+name: Tag release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  tag:
+    # Must match a label of one of your Forgejo runners.
+    runs-on: docker
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag the newest metainfo release
+        env:
+          # Must match the releaser's tag-prefix.
+          TAG_PREFIX: v
+          # Path of the metainfo file, when the search below finds several.
+          METAINFO: ""
+        run: |
+          version=$(python3 - <<'EOF'
+          import os, re, sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          path = os.environ["METAINFO"]
+          if not path:
+              skip = {".git", ".flatpak-builder", "build", "_build", "builddir", "target", "node_modules"}
+              found = [p for p in Path(".").rglob("*")
+                       if p.is_file() and not skip & set(p.parts)
+                       and re.sub(r"(\.in)+$", "", p.name).endswith((".metainfo.xml", ".appdata.xml"))]
+              if len(found) != 1:
+                  sys.exit(f"found {len(found)} metainfo files; set METAINFO to the right one"
+                           if found else "no metainfo file found; set METAINFO")
+              path = found[0]
+          releases = ET.parse(path).getroot().find("releases")
+          # Releases kept in a separate file (type="external") are released by pushing a tag by hand.
+          entries = [] if releases is None or releases.get("type") == "external" else releases.findall("release")
+          print(entries[0].get("version", "") if entries else "")
+          EOF
+          )
+          if [ -z "$version" ]; then
+            echo "No release in the metainfo; nothing to tag."
+            exit 0
+          fi
+          tag="$TAG_PREFIX$version"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "$tag already exists; nothing to tag."
+            exit 0
+          fi
+          git tag "$tag"
+          git push origin "refs/tags/$tag"
+          echo "Tagged $tag; the mirror carries it to GitHub, which releases it."
