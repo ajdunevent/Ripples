@@ -21,6 +21,9 @@ jobs:
       id-token: write
     with:
       create-tags: false
+      # Each version must equal the metainfo release; the first match is the [package] version.
+      version-files: |
+        Cargo.toml: version = "([^"]+)"
       # Ponds updated at once after a release, one owner/repository per line. Without the
       # POND_TOKEN secret they pick the release up at their next scheduled check.
       ponds: |

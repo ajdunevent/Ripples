@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>net.dunevent.Ripples</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Ripples</name>
+  <summary>Sync your files with Nextcloud</summary>
+  <developer id="net.dunevent">
+    <name>Ripples contributors</name>
+  </developer>
+  <url type="homepage">https://dev.dunevent.net/aj/Ripples</url>
+  <url type="bugtracker">https://dev.dunevent.net/aj/Ripples/issues</url>
+  <url type="vcs-browser">https://dev.dunevent.net/aj/Ripples</url>
+  <url type="donation">https://dunevent.net/donate</url>
+  <update_contact>aj@dunevent.net</update_contact>
+  <description>
+    <p>
+      Ripples keeps folders on your device in sync with Nextcloud. It is built
+      for GNOME and Phosh, and adapts from phones to desktops.
+    </p>
+    <ul>
+      <li>Sign in with Nextcloud's login flow, or use an account from GNOME Online Accounts</li>
+      <li>Several folder pairs per account, each two-way, upload only or download only</li>
+      <li>Changes noticed at once on your device, and on the server when it supports push</li>
+      <li>Renames and moves are replayed instead of uploaded again, and every transfer is atomic</li>
+      <li>Conflicts shown with both versions' details and four ways to resolve them</li>
+      <li>Exclusion patterns, excluded folders, .no-sync files and a file size limit</li>
+      <li>Optional pausing on metered connections and in power saver mode</li>
+      <li>Tray icon, start at login and syncing in the background</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">net.dunevent.Ripples.desktop</launchable>
+  <provides>
+    <binary>ripples</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <branding>
+    <color type="primary" scheme_preference="light">#6ec0ff</color>
+    <color type="primary" scheme_preference="dark">#0b3d73</color>
+  </branding>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+  <screenshots>
+    <screenshot type="default">
+      <caption>The Session tab on a phone</caption>
+      <image>https://dev.dunevent.net/aj/Ripples/raw/branch/main/docs/screenshots/phone.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Transfers in progress</caption>
+      <image>https://dev.dunevent.net/aj/Ripples/raw/branch/main/docs/screenshots/transfer.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Options for resolving a conflict</caption>
+      <image>https://dev.dunevent.net/aj/Ripples/raw/branch/main/docs/screenshots/conflict-dialog.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The Connections tab on a phone</caption>
+      <image>https://dev.dunevent.net/aj/Ripples/raw/branch/main/docs/screenshots/connections.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The first page of adding a connection</caption>
+      <image>https://dev.dunevent.net/aj/Ripples/raw/branch/main/docs/screenshots/add-connection.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The Settings tab on a phone</caption>
+      <image>https://dev.dunevent.net/aj/Ripples/raw/branch/main/docs/screenshots/settings.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The tray icon and its menu</caption>
+      <image>https://dev.dunevent.net/aj/Ripples/raw/branch/main/docs/screenshots/tray.png</image>
+    </screenshot>
+  </screenshots>
+  <releases>
+    <release version="0.1.1" date="2026-11-07">
+      <description>
+        <p>Metainfo updates.</p>
+        <ul>
+          <li>Store listing with description, links, brand colours and screenshots</li>
+          <li>The About dialog shows the same developer and links</li>
+        </ul>
+      </description>
+    </release>
+    <release version="0.1.0" date="2026-11-01">
+      <description>
+        <p>First release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

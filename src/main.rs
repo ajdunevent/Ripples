@@ -2962,7 +2962,10 @@ fn build_or_present_window(app: &libadwaita::Application, state: &Rc<AppState>) 
                 .application_icon("net.dunevent.Ripples")
                 .version(env!("CARGO_PKG_VERSION")) // reads straight from Cargo.toml -- can't drift out of sync with the real build
                 .comments("An adaptive Nextcloud sync client built for GNOME Shell and Phosh")
+                .developer_name("Ripples contributors")
+                .developers(["AJ Dunevent"])
                 .website("https://dev.dunevent.net/aj/Ripples")
+                .issue_url("https://dev.dunevent.net/aj/Ripples/issues")
                 // Ripples itself is GPLv3 -- gtk4::License::Gpl30
                 // gives AdwAboutDialog's own built-in license display
                 // (standard boilerplate + full text on request), not
@@ -2970,20 +2973,19 @@ fn build_or_present_window(app: &libadwaita::Application, state: &Rc<AppState>) 
                 .license_type(gtk4::License::Gpl30)
                 // AdwAboutDialog auto-collapses to one page when the
                 // Details page would only ever hold the website link,
-                // but the Donate/Fediverse links below push it into a
+                // but the Donate link below pushes it into a
                 // real two-page (main + Details) layout instead -- see
                 // the widget's own doc comment on add_link for that
                 // exact "collapses to one page if there's nothing more
                 // than website" rule. Given that, the default content
                 // height (sized comfortably for the short main page)
-                // left the Details page's three link rows looking
+                // left the Details page's link rows looking
                 // cramped. A taller fixed height fixes both pages at
                 // once, since it's one shared dialog size, not a
                 // per-page one.
                 .content_height(480)
                 .build();
-            about.add_link("Donate", "https://paypal.me/ajdunevent");
-            about.add_link("Fediverse", "https://social.dunevent.net/@aj");
+            about.add_link("Donate", "https://dunevent.net/donate");
             // MoreWaita's own license (GPLv3) requires attribution on
             // redistribution -- these are their actual files (see
             // tray.rs), not something adapted/modified here.

@@ -1,6 +1,6 @@
 [package]
 name = "ripples"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 # -or-later rather than -only; MoreWaita's bundled tray icons (tray.rs) are GPL-3.0-only.
 license = "GPL-3.0-or-later"
