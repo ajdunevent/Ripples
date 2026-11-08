@@ -77,6 +77,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.1.3" date="2026-11-07">
+      <description>
+        <p>Folder moves and a tidier Session tab.</p>
+        <ul>
+          <li>A directory that disappears locally is left alone for 15 seconds, so a move is recognized as a rename and is not synced as a deletion</li>
+          <li>The Session tab's log uses the interface font, and View Full Log sits in the same group as the log</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.2" date="2026-11-07">
       <description>
         <p>Settle moved directories, Shrink log text font.</p>

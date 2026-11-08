@@ -100,13 +100,6 @@ case $profile_choice in
         ;;
 esac
 
-locked=()
-if [[ -f Cargo.lock ]]; then
-    locked=(--locked)
-else
-    echo "No Cargo.lock: crate versions are resolved fresh and not reproducible." >&2
-fi
-
 if command -v flatpak >/dev/null && flatpak info org.flatpak.Builder >/dev/null 2>&1; then
     builder=(flatpak run org.flatpak.Builder)
 elif command -v flatpak-builder >/dev/null; then
@@ -177,7 +170,7 @@ build_app() {
         --env=CARGO_TERM_COLOR=always
         "${profile_env[@]}" "$state/build")
     echo "==> Compiling $arch ($variant)"
-    "${sdk_shell[@]}" cargo build --profile "$profile" "${locked[@]}"
+    "${sdk_shell[@]}" cargo build --profile "$profile"
     # shellcheck disable=SC2016 # $1 expands inside the sandbox.
     "${sdk_shell[@]}" sh -c '
         set -e

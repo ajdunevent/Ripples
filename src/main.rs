@@ -204,7 +204,7 @@ struct WindowWidgets {
     active_transfers_row: libadwaita::ExpanderRow,
     conflicts_row: libadwaita::ActionRow,
     conflicts_icon: gtk4::Image,
-    view_log_button: gtk4::Button,
+    view_log_button: libadwaita::ActionRow,
     log_view: gtk4::TextView,
     capabilities_row: libadwaita::ExpanderRow,
     etag_cap_row: CapabilityRow,
@@ -1570,7 +1570,7 @@ struct StatusTab {
     active_transfers_row: libadwaita::ExpanderRow,
     conflicts_row: libadwaita::ActionRow,
     conflicts_icon: gtk4::Image,
-    view_log_button: gtk4::Button,
+    view_log_button: libadwaita::ActionRow,
     log_view: gtk4::TextView,
     sync_now_button: gtk4::Button,
     pause_button: gtk4::Button,
@@ -1696,7 +1696,6 @@ fn build_status_tab() -> StatusTab {
         .right_margin(12)
         .top_margin(6)
         .bottom_margin(6)
-        .css_classes(["monospace", "caption"])
         .build();
     // External vertical policy: the scroller does not grow to the content's
     // height, so only the last lines that fit are visible.
@@ -1719,22 +1718,26 @@ fn build_status_tab() -> StatusTab {
     vadjustment.connect_changed(move |adjustment| pin_to_bottom(adjustment));
     vadjustment.connect_value_changed(move |adjustment| pin_to_bottom(adjustment));
 
-    let log_card = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .css_classes(["card"])
-        .vexpand(true)
-        .build();
-    log_card.append(&log_scroller);
-
-    let view_log_content = gtk4::Box::builder().spacing(6).build();
-    view_log_content.append(&gtk4::Label::builder().label("View Full Log").css_classes(["caption"]).build());
-    view_log_content.append(&gtk4::Image::from_icon_name("adw-external-link-symbolic"));
-    let view_log_button = gtk4::Button::builder()
-        .child(&view_log_content)
-        .css_classes(["flat"])
-        .halign(gtk4::Align::End)
+    let view_log_button = libadwaita::ActionRow::builder()
+        .title("View Full Log")
+        .activatable(true)
         .sensitive(false)
         .build();
+    action_row_add_suffix(&view_log_button, &gtk4::Image::from_icon_name("adw-external-link-symbolic"));
+
+    let log_row = gtk4::ListBoxRow::builder()
+        .activatable(false)
+        .selectable(false)
+        .vexpand(true)
+        .child(&log_scroller)
+        .build();
+    let log_list = gtk4::ListBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .vexpand(true)
+        .build();
+    log_list.append(&log_row);
+    log_list.append(&view_log_button);
 
     let log_title = gtk4::Label::builder()
         .label("Log")
@@ -1747,8 +1750,7 @@ fn build_status_tab() -> StatusTab {
         .vexpand(true)
         .build();
     log_section.append(&log_title);
-    log_section.append(&log_card);
-    log_section.append(&view_log_button);
+    log_section.append(&log_list);
 
     let content = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -3004,7 +3006,7 @@ fn build_or_present_window(app: &libadwaita::Application, state: &Rc<AppState>) 
     ));
     app.add_action(&about_action);
 
-    view_log_button.connect_clicked(clone!(
+    view_log_button.connect_activated(clone!(
         #[strong] state,
         #[strong] window,
         move |_| {
