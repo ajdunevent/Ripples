@@ -759,6 +759,18 @@ const TEMP_FILE_RETRY_LIMIT: u32 = 2;
 /// bulk-delete.
 const CLEANUP_RETRY_COOLDOWN_SECS: u64 = 60;
 
+/// Seconds a previously synced directory must stay missing locally before
+/// its deletion is propagated or its remote copy is recreated locally. A
+/// local move shows up first as the old path vanishing; acting before the
+/// new path is seen deleted the remote tree or re-downloaded it to the old
+/// path, which also defeated rename pairing for the new path.
+const MISSING_DIR_SETTLE_SECS: u64 = 15;
+
+thread_local! {
+    static MISSING_DIR_FIRST_SEEN: RefCell<HashMap<(String, String), std::time::Instant>> =
+        RefCell::new(HashMap::new());
+}
+
 /// Runs the actual recursive walk for one connection. `target`'s own
 /// remote_base_url/chunking_base_url/username/password are expected to
 /// already be populated -- the caller resolves these once, up front,
@@ -2668,6 +2680,22 @@ async fn sync_child_directory(
             eprintln!("[{}] [debug] {child_relative}: previously_synced={previously_synced}", now_hms());
         }
 
+        let settle_key = (target.connection_id.clone(), child_relative.to_string());
+        if previously_synced && !exists_locally {
+            let first_seen = MISSING_DIR_FIRST_SEEN.with(|seen| *seen.borrow_mut().entry(settle_key.clone()).or_insert_with(std::time::Instant::now));
+            if first_seen.elapsed().as_secs() < MISSING_DIR_SETTLE_SECS {
+                target.had_freshness_deferral.set(true);
+                target.dirty_dirs.borrow_mut()
+                    .entry(target.connection_id.clone())
+                    .or_default()
+                    .insert(local_dir.to_path_buf());
+                return Ok(());
+            }
+        }
+        if !(previously_synced && !exists_locally) {
+            MISSING_DIR_FIRST_SEEN.with(|seen| seen.borrow_mut().remove(&settle_key));
+        }
+
         if previously_synced {
             // Real, reported bug: with notify_push connected, ANY remote
             // change -- including the very flurry of ordinary per-file
@@ -2774,6 +2802,7 @@ async fn sync_child_directory(
                     // now-irrelevant failure -- harmless no-op if there
                     // was never one, via HashMap::remove's own contract.
                     target.cleanup_retry_cooldown.borrow_mut().remove(child_relative);
+                    MISSING_DIR_FIRST_SEEN.with(|seen| seen.borrow_mut().remove(&settle_key));
                     journal::forget_prefix(journal_conn, &target.connection_id, child_relative)?;
                     let _ = events_tx.try_send(SyncEvent::ItemDeleted {
                         connection: target.connection_name.clone(),

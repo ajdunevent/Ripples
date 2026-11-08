@@ -33,7 +33,7 @@
             "name": "ripples",
             "buildsystem": "simple",
             "build-commands": [
-                "cargo build --release --locked",
+                "cargo build --release",
                 "install -Dm755 target/release/ripples /app/bin/ripples",
                 "install -Dm644 assets/net.dunevent.Ripples.desktop /app/share/applications/net.dunevent.Ripples.desktop",
                 "install -Dm644 assets/net.dunevent.Ripples.metainfo.xml /app/share/metainfo/net.dunevent.Ripples.metainfo.xml",

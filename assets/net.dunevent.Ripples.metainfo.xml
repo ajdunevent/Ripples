@@ -77,6 +77,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.1.2" date="2026-11-07">
+      <description>
+        <p>Settle moved directories, Shrink log text font.</p>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-11-07">
       <description>
         <p>Metainfo updates.</p>

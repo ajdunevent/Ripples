@@ -1696,7 +1696,7 @@ fn build_status_tab() -> StatusTab {
         .right_margin(12)
         .top_margin(6)
         .bottom_margin(6)
-        .css_classes(["monospace"])
+        .css_classes(["monospace", "caption"])
         .build();
     // External vertical policy: the scroller does not grow to the content's
     // height, so only the last lines that fit are visible.
@@ -1727,7 +1727,7 @@ fn build_status_tab() -> StatusTab {
     log_card.append(&log_scroller);
 
     let view_log_content = gtk4::Box::builder().spacing(6).build();
-    view_log_content.append(&gtk4::Label::new(Some("View Full Log")));
+    view_log_content.append(&gtk4::Label::builder().label("View Full Log").css_classes(["caption"]).build());
     view_log_content.append(&gtk4::Image::from_icon_name("adw-external-link-symbolic"));
     let view_log_button = gtk4::Button::builder()
         .child(&view_log_content)
