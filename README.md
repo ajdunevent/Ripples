@@ -76,37 +76,13 @@ An adaptive Nextcloud sync client built for GNOME Shell and Phosh using Rust and
   <img src="docs/screenshots/tray.png" alt="System tray icon showing menu">
 </p>
 
-## Building
+## Installing
 
-Requirements:
+### Flatpak (recommended)
 
-- Rust toolchain (2021 edition)
-- GTK 4.18 or later and libadwaita 1.5 or later, with development headers
-- `pkg-config` and a C compiler such as `gcc`
-
-```
-git clone https://dev.dunevent.net/aj/Ripples.git && cd Ripples
-cargo build --release
-```
-
-Developed against GTK 4.22 and libadwaita 1.9.
-
-## Command-line flags
-
-| Flag | Effect |
+| <a href="https://ajdunevent.github.io/AJHub/"><picture><source media="(prefers-color-scheme: dark)" srcset="https://ajdunevent.github.io/AJHub/badges/button-dark.svg"><img src="https://ajdunevent.github.io/AJHub/badges/button-light.svg" alt="AJHub, published with FrogPak" height="48"></picture></a> | <a href="https://furihub.github.io/repo/"><picture><source media="(prefers-color-scheme: dark)" srcset="https://furihub.github.io/repo/badges/button-dark.svg"><img src="https://furihub.github.io/repo/badges/button-light.svg" alt="FuriHub, published with FrogPak" height="48"></picture></a> |
 | --- | --- |
-| `--hidden` | Start without showing the window (used by autostart) |
-| `--debug` | Enable verbose `[debug]` logging |
-| `--watchdog` | Log UI stalls and slow main-thread operations to the session log |
-
-## Files
-
-| Path | Contents |
-| --- | --- |
-| `~/.config/ripples/config.json` | Accounts, connections, and settings |
-| `~/.config/ripples/custom-exclude-patterns.json` | Custom exclusion patterns |
-| `~/.local/share/ripples/journal.sqlite3` | Sync journal (last-synced state for every item) |
-| `~/.local/share/ripples/logs/` | Session logs |
+| x86_64 & aarch64 | aarch64 only |
 
 ## Limitations
 
@@ -116,11 +92,6 @@ Developed against GTK 4.22 and libadwaita 1.9.
 - Excluded-folder rules are exact paths and do not follow a rename
 - Sync Connections cannot nest or overlap
 - Symlinks are ignored
-
-## Roadmap
-
-- Resumable uploads and downloads
-- Exclusion rules that follow renames
 
 ## AI Disclaimer
 
